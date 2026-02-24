@@ -1,0 +1,4 @@
+# WildCatcher - macOS (MPS GPU on Apple Silicon, CPU on Intel)
+-r requirements-base.txt
+torch>=2.0.0
+torchvision>=0.15.0

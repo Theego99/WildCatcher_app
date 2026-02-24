@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+dist/
+build/
+*.spec.bak
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# PyInstaller
+*.manifest
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# License files (user-specific, do not commit)
+license.wcl
+
+# Large model files — use Git LFS for these
+# *.pt
+
+# Output data
+detection_data/

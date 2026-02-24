@@ -1,0 +1,182 @@
+# .github/workflows/release.yml
+# Builds WildCatcher for Windows, macOS, and Linux when a version tag is pushed.
+#
+# Usage:
+#   git tag v1.0.0
+#   git push origin v1.0.0
+#
+# This creates a GitHub Release with downloadable .zip files for each platform.
+
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+  # Allow manual trigger for testing
+  workflow_dispatch:
+
+permissions:
+  contents: write   # Needed to create releases
+
+jobs:
+  # ════════════════════════════════════════════
+  # WINDOWS BUILD  (CUDA GPU support)
+  # ════════════════════════════════════════════
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          lfs: true          # Pull Git LFS files (model .pt files)
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+          pip install -r requirements-base.txt
+          pip install pyinstaller
+
+      - name: Build with PyInstaller
+        run: pyinstaller wildcatcher.spec
+
+      - name: Zip output
+        run: Compress-Archive -Path dist/WildCatcher -DestinationPath WildCatcher-Windows-x64.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: WildCatcher-Windows-x64
+          path: WildCatcher-Windows-x64.zip
+
+  # ════════════════════════════════════════════
+  # macOS BUILD  (MPS GPU on Apple Silicon)
+  # ════════════════════════════════════════════
+  build-macos:
+    runs-on: macos-14         # Apple Silicon (M1) runner
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch torchvision
+          pip install -r requirements-base.txt
+          pip install pyinstaller
+
+      - name: Build with PyInstaller
+        run: pyinstaller wildcatcher.spec
+
+      - name: Zip output
+        run: |
+          cd dist
+          zip -r ../WildCatcher-macOS-arm64.zip WildCatcher.app || zip -r ../WildCatcher-macOS-arm64.zip WildCatcher
+          cd ..
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: WildCatcher-macOS-arm64
+          path: WildCatcher-macOS-arm64.zip
+
+  # ════════════════════════════════════════════
+  # LINUX BUILD  (CUDA GPU support)
+  # ════════════════════════════════════════════
+  build-linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1-mesa-glx libglib2.0-0 libxkbcommon-x11-0 \
+            libxcb-xinerama0 libxcb-cursor0 vlc libvlc-dev
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+          pip install -r requirements-base.txt
+          pip install pyinstaller
+
+      - name: Build with PyInstaller
+        run: pyinstaller wildcatcher.spec
+
+      - name: Zip output
+        run: |
+          cd dist
+          tar czf ../WildCatcher-Linux-x64.tar.gz WildCatcher
+          cd ..
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: WildCatcher-Linux-x64
+          path: WildCatcher-Linux-x64.tar.gz
+
+  # ════════════════════════════════════════════
+  # CREATE GITHUB RELEASE
+  # ════════════════════════════════════════════
+  release:
+    needs: [build-windows, build-macos, build-linux]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: WildCatcher ${{ github.ref_name }}
+          body: |
+            ## Downloads
+
+            | Platform | GPU Support | File |
+            |----------|-------------|------|
+            | Windows  | NVIDIA CUDA | `WildCatcher-Windows-x64.zip` |
+            | macOS    | Apple MPS   | `WildCatcher-macOS-arm64.zip` |
+            | Linux    | NVIDIA CUDA | `WildCatcher-Linux-x64.tar.gz` |
+
+            ### Installation
+            1. Download the file for your platform
+            2. Extract the archive
+            3. Run `WildCatcher` (or `WildCatcher.exe` on Windows)
+
+            ### GPU Notes
+            - **Windows/Linux**: Requires NVIDIA GPU + drivers for GPU acceleration
+            - **macOS**: GPU acceleration via Apple MPS on M1/M2/M3/M4 chips
+            - All platforms fall back to CPU if no compatible GPU is found
+          draft: false
+          prerelease: false
+          files: |
+            release-assets/WildCatcher-Windows-x64/WildCatcher-Windows-x64.zip
+            release-assets/WildCatcher-macOS-arm64/WildCatcher-macOS-arm64.zip
+            release-assets/WildCatcher-Linux-x64/WildCatcher-Linux-x64.tar.gz
