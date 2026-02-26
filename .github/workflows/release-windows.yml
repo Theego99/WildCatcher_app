@@ -38,11 +38,12 @@ jobs:
 
       - name: Show output
         run: |
-          Get-ChildItem dist/ -Recurse | Select-Object FullName, Length
-          Get-Item dist/WildCatcher.exe | Select-Object Name, @{n='SizeMB';e={[math]::Round($_.Length/1MB,1)}}
+          Get-ChildItem dist/WildCatcher/ | Select-Object Name, Length | Format-Table
+          $size = (Get-ChildItem dist/WildCatcher/ -Recurse | Measure-Object -Property Length -Sum).Sum / 1MB
+          Write-Host "Total folder size: $([math]::Round($size,1)) MB"
 
       - name: Zip output
-        run: Compress-Archive -Path dist/WildCatcher.exe -DestinationPath WildCatcher-Windows-x64.zip
+        run: Compress-Archive -Path dist/WildCatcher -DestinationPath WildCatcher-Windows-x64.zip
 
       - name: Show zip size
         run: Get-Item WildCatcher-Windows-x64.zip | Select-Object Name, @{n='SizeMB';e={[math]::Round($_.Length/1MB,1)}}
@@ -59,5 +60,5 @@ jobs:
             **For NVIDIA GPU acceleration**, run:
             `pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121`
 
-            **Install:** Download → Extract → Run `WildCatcher.exe`
+            **Install:** Download → Extract the `WildCatcher` folder → Run `WildCatcher.exe` inside it
           files: WildCatcher-Windows-x64.zip
