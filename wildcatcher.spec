@@ -1,12 +1,21 @@
 # -*- mode: python ; coding: utf-8 -*-
 import sys
 import os
+from PyInstaller.utils.hooks import collect_all, collect_dynamic_libs
 
 IS_WINDOWS = sys.platform == 'win32'
 IS_MAC = sys.platform == 'darwin'
 
+# ──────────────────────────────────────────────
+# Collect ALL torch files (submodules, data, DLLs)
+# This is critical — PyInstaller misses many torch
+# DLL dependencies without this.
+# ──────────────────────────────────────────────
+torch_datas, torch_binaries, torch_hiddenimports = collect_all('torch')
+tv_datas, tv_binaries, tv_hiddenimports = collect_all('torchvision')
+
 # Data files
-datas = [
+datas = torch_datas + tv_datas + [
     ('assets', 'assets'),
     ('yolov5', 'yolov5'),
     ('detector_AI_model.pt', '.'),
@@ -19,15 +28,19 @@ datas = [
 if IS_WINDOWS and os.path.isdir('vlc'):
     datas.append(('vlc', 'vlc'))
 
+binaries = torch_binaries + tv_binaries
+
+hiddenimports = torch_hiddenimports + tv_hiddenimports
+
 a = Analysis(
     ['detector_animales_diego.py'],
     pathex=[],
-    binaries=[],
+    binaries=binaries,
     datas=datas,
-    hiddenimports=[],
+    hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=['runtime_hook_torch.py'],   # <-- Fixes DLL loading
     excludes=[],
     noarchive=False,
     optimize=0,
@@ -35,7 +48,7 @@ a = Analysis(
 
 pyz = PYZ(a.pure)
 
-# One-folder mode (required for PyTorch — DLLs need proper relative paths)
+# One-folder mode (required for torch DLLs)
 exe = EXE(
     pyz,
     a.scripts,
@@ -44,8 +57,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
-    upx_exclude=[],
+    upx=False,                # No UPX — it can corrupt torch DLLs
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -61,7 +73,7 @@ coll = COLLECT(
     a.zipfiles,
     a.datas,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     name='WildCatcher',
 )

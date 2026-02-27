@@ -36,9 +36,8 @@ jobs:
       - name: Build with PyInstaller
         run: pyinstaller wildcatcher.spec
 
-      - name: Show output
+      - name: Show output size
         run: |
-          Get-ChildItem dist/WildCatcher/ | Select-Object Name, Length | Format-Table
           $size = (Get-ChildItem dist/WildCatcher/ -Recurse | Measure-Object -Property Length -Sum).Sum / 1MB
           Write-Host "Total folder size: $([math]::Round($size,1)) MB"
 
