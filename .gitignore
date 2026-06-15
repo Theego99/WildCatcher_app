@@ -39,5 +39,8 @@ license.wcl
 # Smoke-test scratch files
 _smoke_*.txt
 
+# Local test footage (copied user data)
+sample_footage/
+
 # Output data
 detection_data/
