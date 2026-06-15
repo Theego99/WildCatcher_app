@@ -1,70 +1,162 @@
 # -*- mode: python ; coding: utf-8 -*-
+"""
+WildCatcher v2.0 — PyInstaller spec file
+Build command:  pyinstaller wildcatcher.spec
+Output:         dist/WildCatcher/WildCatcher.exe
+"""
 import sys
 import os
-from PyInstaller.utils.hooks import collect_all, collect_dynamic_libs
 
-IS_WINDOWS = sys.platform == 'win32'
-IS_MAC = sys.platform == 'darwin'
+block_cipher = None
 
-# ──────────────────────────────────────────────
-# Collect ALL torch files (submodules, data, DLLs)
-# This is critical — PyInstaller misses many torch
-# DLL dependencies without this.
-# ──────────────────────────────────────────────
-torch_datas, torch_binaries, torch_hiddenimports = collect_all('torch')
-tv_datas, tv_binaries, tv_hiddenimports = collect_all('torchvision')
+# ---------------------------------------------------------------------------
+# Data files to bundle (src, dest_in_bundle)
+# ---------------------------------------------------------------------------
+added_data = [
+    # Built-in YOLOv5 detector (required — the only detector available)
+    ('detector_AI_model.pt',           '.'),
 
-# Data files
-datas = torch_datas + tv_datas + [
-    ('assets', 'assets'),
-    ('yolov5', 'yolov5'),
-    ('detector_AI_model.pt', '.'),
-    ('prec90rec93f191.pt', '.'),
-    ('process_images.py', '.'),
-    ('load_detector.py', '.'),
-    ('video_player.py', '.'),
+    # User models folder (registry + classifier .pth files)
+    ('models',                         'models'),
+
+    # UI assets
+    ('assets',                         'assets'),
+
+    # VLC runtime (entire folder)
+    ('vlc',                            'vlc'),
+
+    # YOLOv5 inference code (bundled as data, loaded via sys.path at runtime)
+    ('yolov5',                         'yolov5'),
 ]
 
-if IS_WINDOWS and os.path.isdir('vlc'):
-    datas.append(('vlc', 'vlc'))
+# ---------------------------------------------------------------------------
+# Hidden imports PyInstaller can't auto-detect
+# ---------------------------------------------------------------------------
+hidden_imports = [
+    # --- PyQt5 ---
+    'PyQt5.sip',
 
-binaries = torch_binaries + tv_binaries
+    # --- Torch / Torchvision ---
+    'torch',
+    'torch.nn',
+    'torch.nn.functional',
+    'torch.cuda',
+    'torch.backends.cudnn',
+    'torch.utils.data',
+    'torchvision',
+    'torchvision.models',
+    'torchvision.transforms',
+    'torchvision.transforms.functional',
+    'torchvision.ops',
 
-hiddenimports = torch_hiddenimports + tv_hiddenimports
+    # --- OpenCV ---
+    'cv2',
 
+    # --- PIL / Pillow ---
+    'PIL',
+    'PIL.Image',
+    'PIL.ExifTags',
+    'PIL.ImageOps',
+    'PIL.ImageDraw',
+
+    # --- Crypto (pycryptodome) for license verification ---
+    'Crypto',
+    'Crypto.PublicKey',
+    'Crypto.PublicKey.RSA',
+    'Crypto.Signature',
+    'Crypto.Signature.pkcs1_15',
+    'Crypto.Hash',
+    'Crypto.Hash.SHA256',
+
+    # --- VLC Python bindings ---
+    'vlc',
+
+    # --- Ultralytics (required by yolov5 code) ---
+    'ultralytics',
+    'ultralytics.utils',
+    'ultralytics.utils.checks',
+    'ultralytics.utils.plotting',
+
+    # --- Scientific / data ---
+    'numpy',
+    'pandas',
+    'matplotlib',
+    'matplotlib.pyplot',
+    'matplotlib.backends.backend_agg',
+    'seaborn',
+    'scipy',
+    'scipy.ndimage',
+    'scipy.ndimage.filters',
+    'yaml',
+    'psutil',
+    'tqdm',
+    'requests',
+    'openpyxl',
+
+    # --- YOLOv5 modules (needed when torch.load unpickles the detector) ---
+    # These are imported WITHOUT the "yolov5." prefix because the app
+    # adds yolov5/ to sys.path at runtime.
+    'models',
+    'models.common',
+    'models.experimental',
+    'models.yolo',
+    'utils',
+    'utils.augmentations',
+    'utils.autoanchor',
+    'utils.dataloaders',
+    'utils.downloads',
+    'utils.general',
+    'utils.metrics',
+    'utils.plots',
+    'utils.torch_utils',
+    'utils.activations',
+]
+
+# ---------------------------------------------------------------------------
+# Analysis
+# ---------------------------------------------------------------------------
 a = Analysis(
     ['detector_animales_diego.py'],
-    pathex=[],
-    binaries=binaries,
-    datas=datas,
-    hiddenimports=hiddenimports,
+    pathex=['.', 'yolov5'],
+    binaries=[],
+    datas=added_data,
+    hiddenimports=hidden_imports,
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=['runtime_hook_torch.py'],   # <-- Fixes DLL loading
-    excludes=[],
+    runtime_hooks=[],
+    excludes=[
+        'tkinter', '_tkinter',
+        'xmlrpc',
+        'doctest',
+        'test',
+        'IPython',
+        'jupyter',
+    ],
+    win_no_prefer_redirects=False,
+    win_private_assemblies=False,
+    cipher=block_cipher,
     noarchive=False,
-    optimize=0,
 )
 
-pyz = PYZ(a.pure)
+pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
-# One-folder mode (required for torch DLLs)
 exe = EXE(
     pyz,
     a.scripts,
+    [],
     exclude_binaries=True,
     name='WildCatcher',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=False,                # No UPX — it can corrupt torch DLLs
-    console=False,
+    upx=False,
+    console=False,           # No console window
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['assets/app_icon.ico'] if IS_WINDOWS and os.path.isfile('assets/app_icon.ico') else [],
+    icon='assets/app_icon.ico',
 )
 
 coll = COLLECT(
@@ -77,18 +169,3 @@ coll = COLLECT(
     upx_exclude=[],
     name='WildCatcher',
 )
-
-if IS_MAC:
-    app = BUNDLE(
-        coll,
-        name='WildCatcher.app',
-        icon='assets/app_icon.icns' if os.path.isfile('assets/app_icon.icns') else None,
-        bundle_identifier='com.wildcatcher.app',
-        info_plist={
-            'CFBundleName': 'WildCatcher',
-            'CFBundleDisplayName': 'WildCatcher',
-            'CFBundleVersion': '1.0.0',
-            'CFBundleShortVersionString': '1.0.0',
-            'NSHighResolutionCapable': True,
-        },
-    )

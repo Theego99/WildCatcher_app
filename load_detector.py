@@ -27,8 +27,8 @@ class PTDetector:
     IMAGE_SIZE = 1280
     STRIDE = 64
 
-    def __init__(self, model_path, force_cpu=False, use_model_native_classes= False):
-        
+    def __init__(self, model_path, force_cpu=False, use_model_native_classes=False):
+
         self.device = 'cpu'
         if not force_cpu:
             if torch.cuda.is_available():
@@ -38,18 +38,24 @@ class PTDetector:
                     self.device = 'mps'
             except AttributeError:
                 pass
+
         try:
             self.model = PTDetector._load_model(model_path, self.device)
-        except Exception as e:
-            if "Can't get attribute 'DetectionModel'" in str(e):
-                print('Forward-compatibility issue detected, patching')            
+            if self.device != 'cpu':
+                print('Sending model to GPU')
+                self.model.to(self.device)
+                # Force a kernel launch to verify GPU actually works
+                torch.zeros(1, device=self.device).sum()
+        except RuntimeError as e:
+            if self.device != 'cpu':
+                print(f'GPU failed: {e}')
+                print('Falling back to CPU — processing will be slower.')
+                self.device = 'cpu'
+                self.model = PTDetector._load_model(model_path, self.device)
             else:
                 raise
-        if (self.device != 'cpu'):
-            print('Sending model to GPU')
-            self.model.to(self.device)
-            
-        self.printed_image_size_warning = False        
+
+        self.printed_image_size_warning = False
         self.use_model_native_classes = use_model_native_classes
         
 
