@@ -29,9 +29,8 @@ OutputBaseFilename=WildCatcher_v{#MyAppVersion}_Setup
 SetupIconFile=assets\app_icon.ico
 Compression=lzma2/ultra64
 SolidCompression=yes
-DiskSpanning=yes
-SlicesPerDisk=1
-DiskSliceSize=max
+; Single self-contained Setup.exe (no .bin slices) for simple client delivery
+DiskSpanning=no
 WizardStyle=modern
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible

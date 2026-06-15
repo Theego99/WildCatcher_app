@@ -9,8 +9,12 @@ ONLY for one-shot conversion of user-added .pt/.pth models (wc_convert), so
 install the CPU-ONLY torch build before packaging to keep the bundle small.
 """
 import os
+import sys
 
 block_cipher = None
+
+# PyInstaller rejects a .ico icon on macOS (wants .icns); use the icon only on Windows.
+_app_icon = 'assets/app_icon.ico' if sys.platform == 'win32' else None
 
 # torch / torchvision / onnxruntime are pulled in via hiddenimports below and
 # collected by PyInstaller's built-in hooks (hook-torch, hook-onnxruntime, ...).
@@ -122,7 +126,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='assets/app_icon.ico',
+    icon=_app_icon,
 )
 
 coll = COLLECT(
