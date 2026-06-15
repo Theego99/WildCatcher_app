@@ -40,10 +40,11 @@ jobs:
           python -c "import onnxruntime as ort; print('ORT', ort.__version__); print('providers', ort.get_available_providers())"
 
       - name: Convert built-in detector to ONNX (build-time only)
-        # ultralytics is needed only to load the YOLOv5 .pt for conversion; it is
-        # NOT bundled into the app (the spec excludes it).
+        # ultralytics + yolov5's module-load deps (pandas/seaborn/tqdm) are needed
+        # only to load the YOLOv5 .pt for conversion; NONE are bundled into the app
+        # (the spec excludes yolov5/ultralytics and the runtime never imports them).
         run: |
-          pip install ultralytics
+          pip install ultralytics pandas seaborn tqdm
           python tools/convert_to_onnx.py
 
       - name: Build with PyInstaller
