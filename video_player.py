@@ -16,21 +16,32 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
-# --- VLC DLL and plugin setup (ONLY ONCE, globally) ---
+# --- VLC library + plugin setup (ONLY ONCE, globally) ---
+# Windows ships a bundled vlc/ folder; macOS/Linux fall back to a system VLC
+# install (python-vlc locates it). Never hard-fail here — the app must launch
+# even if VLC is absent (video playback is optional; detection/export don't need it).
 vlc_path = resource_path('vlc')
-libvlc_path = os.path.join(vlc_path, 'libvlc.dll')
+_LIBVLC_NAME = {'win32': 'libvlc.dll', 'darwin': 'libvlc.dylib'}.get(sys.platform, 'libvlc.so')
+libvlc_path = os.path.join(vlc_path, _LIBVLC_NAME)
 plugins_path = os.path.join(vlc_path, 'plugins')
 os.environ['PATH'] = vlc_path + os.pathsep + os.environ.get('PATH', '')
-os.environ['VLC_PLUGIN_PATH'] = plugins_path
+if os.path.isdir(plugins_path):
+    os.environ['VLC_PLUGIN_PATH'] = plugins_path
 
 try:
-    ctypes.CDLL(libvlc_path)
-    logging.debug("Successfully loaded libvlc.dll")
+    if os.path.exists(libvlc_path):
+        ctypes.CDLL(libvlc_path)
+        logging.debug(f"Loaded bundled libvlc from {libvlc_path}")
 except Exception as e:
-    logging.error(f"Failed to load libvlc.dll: {e}")
-    # Optionally: sys.exit(1)  # Uncomment if you want to hard-fail
+    logging.error(f"Failed to preload bundled libvlc: {e}")
 
-import vlc  # <-- do this only after the above setup
+try:
+    import vlc  # python-vlc; uses bundled or system libvlc
+    VLC_AVAILABLE = True
+except Exception as e:
+    logging.error(f"python-vlc not available (is VLC installed?): {e}")
+    vlc = None
+    VLC_AVAILABLE = False
 
 from PyQt5 import QtWidgets, QtGui
 from PyQt5.QtCore import Qt, QSize
@@ -172,59 +183,41 @@ class VideoPlayer(QtWidgets.QMainWindow):
 
             # Set the window icon
             self.setWindowIcon(QtGui.QIcon(icon_path))
-            # Path to VLC directory
+            # Locate libvlc: prefer the bundled copy (Windows ships vlc/), else
+            # rely on a system VLC install (macOS/Linux). Never sys.exit here —
+            # raise so the caller keeps the app alive (video playback is optional).
             vlc_path = resource_path('vlc')
-            logging.debug(f"VLC path set to: {vlc_path}")
-
-            # Path to libvlc.dll
-            libvlc_path = os.path.join(vlc_path, 'libvlc.dll')
-            logging.debug(f"libvlc.dll path set to: {libvlc_path}")
-
-            # Check if libvlc.dll exists
-            if not os.path.exists(libvlc_path):
-                error_msg = f"libvlc.dll not found at {libvlc_path}. Please ensure the VLC directory is bundled correctly."
-                logging.error(error_msg)
-                QMessageBox.critical(
-                    self,
-                    "VLC DLL Not Found",
-                    error_msg
-                )
-                sys.exit(1)
-
-            # Load libvlc.dll using ctypes
-            try:
-                ctypes.cdll.LoadLibrary(libvlc_path)
-                logging.debug(f"Successfully loaded libvlc.dll from {libvlc_path}")
-            except Exception as e:
-                error_msg = f"Failed to load libvlc.dll: {e}"
-                logging.error(error_msg)
-                QMessageBox.critical(
-                    self,
-                    "Failed to Load VLC DLL",
-                    error_msg
-                )
-                sys.exit(1)
-
-            # Set the VLC plugin path environment variable
+            libvlc_path = os.path.join(vlc_path, _LIBVLC_NAME)
             plugins_path = os.path.join(vlc_path, 'plugins')
-            os.environ['VLC_PLUGIN_PATH'] = plugins_path
-            logging.debug(f"VLC_PLUGIN_PATH set to: {plugins_path}")
+            if os.path.exists(libvlc_path):
+                try:
+                    ctypes.cdll.LoadLibrary(libvlc_path)
+                    os.environ['VLC_PLUGIN_PATH'] = plugins_path
+                    logging.debug(f"Loaded bundled libvlc from {libvlc_path}")
+                except Exception as e:
+                    logging.error(f"Failed to load bundled libvlc: {e}")
 
-            # Initialize VLC instance with the plugin path
+            if not VLC_AVAILABLE or vlc is None:
+                error_msg = ("VLC is not available. Install VLC from videolan.org "
+                             "to use the video player.")
+                QMessageBox.critical(self, "VLC not available", error_msg)
+                raise RuntimeError(error_msg)
+
+            # Initialize VLC instance (use bundled plugins if present, else system VLC)
             try:
-                self.instance = vlc.Instance('--no-xlib', f'--plugin-path={plugins_path}')
+                if os.path.isdir(plugins_path):
+                    self.instance = vlc.Instance('--no-xlib', f'--plugin-path={plugins_path}')
+                else:
+                    self.instance = vlc.Instance('--no-xlib')
                 if self.instance is None:
                     raise ValueError("vlc.Instance() returned None.")
                 logging.debug("VLC Instance created successfully.")
             except Exception as e:
-                error_msg = f"Failed to create VLC Instance: {e}"
+                error_msg = ("Could not start VLC. On macOS/Linux, install VLC from "
+                             f"videolan.org to use the video player. ({e})")
                 logging.error(error_msg)
-                QMessageBox.critical(
-                    self,
-                    "VLC Initialization Error",
-                    error_msg
-                )
-                sys.exit(1)
+                QMessageBox.critical(self, "VLC Initialization Error", error_msg)
+                raise RuntimeError(error_msg)
 
             # Initialize media player
             try:
@@ -240,7 +233,7 @@ class VideoPlayer(QtWidgets.QMainWindow):
                     "Media Player Initialization Error",
                     error_msg
                 )
-                sys.exit(1)
+                raise RuntimeError(error_msg)
 
             self.current_folder = ""
             self.video_files = []

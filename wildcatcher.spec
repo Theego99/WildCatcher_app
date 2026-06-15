@@ -139,3 +139,18 @@ coll = COLLECT(
     upx_exclude=[],
     name='WildCatcher',
 )
+
+# On macOS, wrap the COLLECT output into a double-clickable .app bundle.
+# (Without this, PyInstaller produces a bare Unix executable that Finder
+# refuses to launch on double-click.)
+if sys.platform == 'darwin':
+    app = BUNDLE(
+        coll,
+        name='WildCatcher.app',
+        icon=None,  # no .icns shipped; uses the default app icon
+        bundle_identifier='com.wildcatcher.app',
+        info_plist={
+            'NSHighResolutionCapable': True,
+            'CFBundleShortVersionString': '2.0',
+        },
+    )
