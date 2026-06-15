@@ -1,0 +1,318 @@
+"""
+WildCatcher output / export engine.
+
+Builds the detection report from a list of per-file records, including only the
+fields the client selected, in the format(s) they chose. Decoupled from the
+processing engine so fields and formats are easy to extend.
+
+Formats:
+  csv       - comma-separated, customizable columns
+  json      - list of objects, customizable keys
+  xlsx      - Excel (File Details + Summary sheets), customizable columns
+  sqlite    - generic SQLite .db (one 'detections' table), customizable columns
+  timelapse - native Timelapse template (.tdb) + data (.ddb) SQLite files
+              (best-effort; see write_timelapse notes)
+
+A "record" is a flat dict keyed by the field keys below; missing keys export
+as empty, so the processing layer can populate whatever it has.
+"""
+import os
+import csv
+import json
+import sqlite3
+from datetime import datetime
+
+# ---------------------------------------------------------------------------
+# Field registry
+# ---------------------------------------------------------------------------
+# Groups (used to organize the settings GUI)
+GROUP_FILE = "file"
+GROUP_TIME = "time"
+GROUP_IMAGE = "image"
+GROUP_VIDEO = "video"
+GROUP_DETECTION = "detection"
+GROUP_SPECIES = "species"
+GROUP_EXIF = "exif"
+GROUP_RUN = "run"
+
+GROUP_ORDER = [GROUP_FILE, GROUP_TIME, GROUP_DETECTION, GROUP_SPECIES,
+               GROUP_IMAGE, GROUP_VIDEO, GROUP_EXIF, GROUP_RUN]
+
+GROUP_LABELS = {  # English; i18n key is "group_<name>"
+    GROUP_FILE: "File", GROUP_TIME: "Time", GROUP_IMAGE: "Image",
+    GROUP_VIDEO: "Video", GROUP_DETECTION: "Detection", GROUP_SPECIES: "Species",
+    GROUP_EXIF: "Camera / EXIF", GROUP_RUN: "Run info",
+}
+
+# (key, stable export header, group, i18n key for the GUI checkbox label)
+FIELDS = [
+    ("id",                 "ID",                  GROUP_FILE,      "field_id"),
+    ("file_name",          "File Name",           GROUP_FILE,      "field_file_name"),
+    ("relative_path",      "Relative Path",       GROUP_FILE,      "field_relative_path"),
+    ("full_path",          "Full Path",           GROUP_FILE,      "field_full_path"),
+    ("folder",             "Folder",              GROUP_FILE,      "field_folder"),
+    ("file_type",          "File Type",           GROUP_FILE,      "field_file_type"),
+    ("file_size_kb",       "File Size (KB)",      GROUP_FILE,      "field_file_size"),
+    ("file_modified",      "File Modified",       GROUP_FILE,      "field_file_modified"),
+    ("time",               "Time",                GROUP_TIME,      "field_time"),
+    ("detection",          "Detection",           GROUP_DETECTION, "field_detection"),
+    ("total_detections",   "Total Detections",    GROUP_DETECTION, "field_total_detections"),
+    ("animal_count",       "Animal Count",        GROUP_DETECTION, "field_animal_count"),
+    ("human_count",        "Human/Vehicle Count", GROUP_DETECTION, "field_human_count"),
+    ("detection_accuracy", "Detection Accuracy",  GROUP_DETECTION, "field_detection_accuracy"),
+    ("species",            "Species",             GROUP_SPECIES,   "field_species"),
+    ("species_all",        "All Species",         GROUP_SPECIES,   "field_species_all"),
+    ("species_counts",     "Species Counts",      GROUP_SPECIES,   "field_species_counts"),
+    ("species_accuracy",   "Species Accuracy",    GROUP_SPECIES,   "field_species_accuracy"),
+    ("image_width",        "Image Width",         GROUP_IMAGE,     "field_image_width"),
+    ("image_height",       "Image Height",        GROUP_IMAGE,     "field_image_height"),
+    ("video_length",       "Video Length (s)",    GROUP_VIDEO,     "field_video_length"),
+    ("video_fps",          "Video FPS",           GROUP_VIDEO,     "field_video_fps"),
+    ("frames_processed",   "Frames Processed",    GROUP_VIDEO,     "field_frames_processed"),
+    ("camera_make",        "Camera Make",         GROUP_EXIF,      "field_camera_make"),
+    ("camera_model",       "Camera Model",        GROUP_EXIF,      "field_camera_model"),
+    ("gps_latitude",       "GPS Latitude",        GROUP_EXIF,      "field_gps_lat"),
+    ("gps_longitude",      "GPS Longitude",       GROUP_EXIF,      "field_gps_lon"),
+    ("processing_date",    "Processing Date",     GROUP_RUN,       "field_processing_date"),
+    ("models_used",        "Models Used",         GROUP_RUN,       "field_models_used"),
+]
+
+FIELD_BY_KEY = {f[0]: f for f in FIELDS}
+ALL_FIELD_KEYS = [f[0] for f in FIELDS]
+
+# Back-compat: the original detection_report.xlsx columns + xlsx-only.
+DEFAULT_FIELDS = ["id", "file_name", "detection", "species", "time",
+                  "video_length", "detection_accuracy", "species_accuracy"]
+DEFAULT_FORMATS = ["xlsx"]
+
+ALL_FORMATS = ["csv", "json", "xlsx", "sqlite", "timelapse"]
+FORMAT_LABELS = {  # i18n key is "format_<name>"
+    "csv": "CSV (.csv)", "json": "JSON (.json)", "xlsx": "Excel (.xlsx)",
+    "sqlite": "SQLite database (.db)", "timelapse": "Timelapse (.ddb/.tdb)",
+}
+
+REPORT_BASENAME = "detection_report"
+
+
+def header_for(key):
+    f = FIELD_BY_KEY.get(key)
+    return f[1] if f else key
+
+
+def fields_by_group():
+    """Return {group: [(key, header, i18n_key), ...]} in display order."""
+    out = {g: [] for g in GROUP_ORDER}
+    for key, header, group, i18n in FIELDS:
+        out.setdefault(group, []).append((key, header, i18n))
+    return out
+
+
+def normalize_fields(fields):
+    """Drop unknown keys, preserve order; fall back to defaults if empty."""
+    valid = [k for k in (fields or []) if k in FIELD_BY_KEY]
+    return valid or list(DEFAULT_FIELDS)
+
+
+def _headers(fields):
+    return [header_for(k) for k in fields]
+
+
+def _row(record, fields):
+    return [record.get(k, "") for k in fields]
+
+
+# ---------------------------------------------------------------------------
+# Individual format writers
+# ---------------------------------------------------------------------------
+def write_csv(path, records, fields):
+    with open(path, "w", newline="", encoding="utf-8-sig") as f:
+        w = csv.writer(f)
+        w.writerow(_headers(fields))
+        for r in records:
+            w.writerow(_row(r, fields))
+
+
+def write_json(path, records, fields):
+    data = [{k: r.get(k, "") for k in fields} for r in records]
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False, default=str)
+
+
+def write_xlsx(path, records, fields, summary=None):
+    from openpyxl import Workbook
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "File Details"
+    ws.append(_headers(fields))
+    for r in records:
+        ws.append(_row(r, fields))
+    if summary:
+        ws2 = wb.create_sheet("Summary")
+        ws2.append(["Category", "Count"])
+        ws2.append(["Total files", summary.get("total_files", 0)])
+        ws2.append(["Empty", summary.get("total_empty", 0)])
+        ws2.append(["Human/Vehicle", summary.get("total_human", 0)])
+        ws2.append(["Animal", summary.get("total_animal", 0)])
+        sc = summary.get("species_counts") or {}
+        if sc:
+            ws2.append([])
+            ws2.append(["Species", "Count"])
+            for sp in sorted(sc):
+                ws2.append([sp, sc[sp]])
+    wb.save(path)
+
+
+def write_sqlite(path, records, fields):
+    if os.path.exists(path):
+        os.remove(path)
+    con = sqlite3.connect(path)
+    try:
+        cols = ", ".join(f'"{k}" TEXT' for k in fields)
+        con.execute(f"CREATE TABLE detections ({cols})")
+        placeholders = ",".join("?" * len(fields))
+        con.executemany(
+            f"INSERT INTO detections VALUES ({placeholders})",
+            [tuple(str(r.get(k, "")) for k in fields) for r in records],
+        )
+        con.commit()
+    finally:
+        con.close()
+
+
+def write_timelapse(out_dir, records):
+    """
+    Best-effort native Timelapse export: a template (.tdb) and a data (.ddb)
+    SQLite database, one DataTable row per file.
+
+    NOTE: Timelapse's schema is version-specific and cannot be validated without
+    Timelapse installed. This targets the common Timelapse 2.x layout. To
+    guarantee compatibility, replace TEMPLATE_CONTROLS / table creation with the
+    schema read from a sample .tdb produced by your Timelapse version, or open
+    the output in Timelapse and adjust. Kept isolated here for easy fixes.
+    """
+    tdb_path = os.path.join(out_dir, REPORT_BASENAME + ".tdb")
+    ddb_path = os.path.join(out_dir, REPORT_BASENAME + ".ddb")
+
+    # Standard controls + WildCatcher data fields (DataLabel -> column).
+    # (Type, DataLabel, Label, DefaultValue, Tooltip, List)
+    controls = [
+        ("File",         "File",         "File",         "", "File name", ""),
+        ("RelativePath", "RelativePath", "RelativePath", "", "Relative path", ""),
+        ("DateTime",     "DateTime",     "DateTime",     "", "Capture time", ""),
+        ("DeleteFlag",   "DeleteFlag",   "Delete?",      "false", "Mark for deletion", ""),
+        ("Note",         "Species",      "Species",      "", "Detected species", ""),
+        ("Counter",      "Count",        "Count",        "0", "Animal count", ""),
+        ("Note",         "Confidence",   "Confidence",   "", "Detection confidence", ""),
+        ("FixedChoice",  "Detection",    "Detection",    "", "animal/human/empty",
+         "animal|human|empty"),
+    ]
+    data_labels = [c[1] for c in controls]
+
+    def _build_template(con):
+        con.execute(
+            "CREATE TABLE TemplateTable ("
+            "Id INTEGER PRIMARY KEY AUTOINCREMENT, ControlOrder INTEGER, "
+            "SpreadsheetOrder INTEGER, Type TEXT, DefaultValue TEXT, Label TEXT, "
+            "DataLabel TEXT, Tooltip TEXT, Width INTEGER, Copyable TEXT, "
+            "Visible TEXT, List TEXT)"
+        )
+        for i, (ctype, dlabel, label, default, tip, lst) in enumerate(controls, start=1):
+            con.execute(
+                "INSERT INTO TemplateTable (ControlOrder, SpreadsheetOrder, Type, "
+                "DefaultValue, Label, DataLabel, Tooltip, Width, Copyable, Visible, List) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (i, i, ctype, default, label, dlabel, tip, 100, "true", "true", lst),
+            )
+
+    # --- .tdb (template only) ---
+    if os.path.exists(tdb_path):
+        os.remove(tdb_path)
+    con = sqlite3.connect(tdb_path)
+    try:
+        _build_template(con)
+        con.commit()
+    finally:
+        con.close()
+
+    # --- .ddb (template copy + ImageSetTable + DataTable) ---
+    if os.path.exists(ddb_path):
+        os.remove(ddb_path)
+    con = sqlite3.connect(ddb_path)
+    try:
+        _build_template(con)
+        con.execute(
+            "CREATE TABLE ImageSetTable ("
+            "Id INTEGER PRIMARY KEY AUTOINCREMENT, Log TEXT, Row INTEGER, "
+            "Selection INTEGER, TimeZone TEXT, VersionCompatibility TEXT, "
+            "SortTerms TEXT, WhiteSpaceTrimmed TEXT)"
+        )
+        con.execute(
+            "INSERT INTO ImageSetTable (Log, Row, Selection, TimeZone, "
+            "VersionCompatibility, SortTerms, WhiteSpaceTrimmed) VALUES "
+            "('Generated by WildCatcher', 0, 0, '', '2.3.0.0', '', 'true')"
+        )
+        cols = ", ".join(f'"{c}" TEXT' for c in data_labels)
+        con.execute(f"CREATE TABLE DataTable (Id INTEGER PRIMARY KEY AUTOINCREMENT, {cols})")
+        placeholders = ",".join("?" * len(data_labels))
+        rows = []
+        for r in records:
+            rows.append((
+                r.get("file_name", ""),
+                r.get("relative_path", "") or r.get("folder", ""),
+                r.get("time", ""),
+                "false",
+                r.get("species", ""),
+                str(r.get("animal_count", "") or 0),
+                str(r.get("detection_accuracy", "")),
+                r.get("detection", "") or "empty",
+            ))
+        con.executemany(
+            f'INSERT INTO DataTable ({", ".join(data_labels)}) VALUES ({placeholders})',
+            rows,
+        )
+        con.commit()
+    finally:
+        con.close()
+
+    return [tdb_path, ddb_path]
+
+
+# ---------------------------------------------------------------------------
+# Dispatcher
+# ---------------------------------------------------------------------------
+def write_reports(records, out_dir, fields=None, formats=None, summary=None, log=None):
+    """
+    Write the report in each requested format. Returns list of written paths.
+    `fields` = ordered list of field keys; `formats` = subset of ALL_FORMATS.
+    Falls back to the back-compat defaults (xlsx, original columns). A failure in
+    one format is logged and skipped so the others still get written.
+    """
+    fields = normalize_fields(fields)
+    formats = [f for f in (formats or []) if f in ALL_FORMATS] or list(DEFAULT_FORMATS)
+    log = log or (lambda m: None)
+
+    # Auto-fill run-level fields if selected
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    for i, r in enumerate(records, start=1):
+        if "id" in fields and not r.get("id"):
+            r["id"] = i
+        if "processing_date" in fields and not r.get("processing_date"):
+            r["processing_date"] = now
+
+    written = []
+    base = os.path.join(out_dir, REPORT_BASENAME)
+    for fmt in formats:
+        try:
+            if fmt == "csv":
+                p = base + ".csv"; write_csv(p, records, fields); written.append(p)
+            elif fmt == "json":
+                p = base + ".json"; write_json(p, records, fields); written.append(p)
+            elif fmt == "xlsx":
+                p = base + ".xlsx"; write_xlsx(p, records, fields, summary); written.append(p)
+            elif fmt == "sqlite":
+                p = base + ".db"; write_sqlite(p, records, fields); written.append(p)
+            elif fmt == "timelapse":
+                written.extend(write_timelapse(out_dir, records))
+        except Exception as e:
+            log(f"  {fmt} export failed: {e}")
+    return written

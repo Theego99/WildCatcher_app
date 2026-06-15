@@ -14,6 +14,7 @@ import json
 import shutil
 import subprocess
 import tempfile
+from datetime import datetime
 
 import cv2
 from PyQt5.QtCore import QThread, pyqtSignal
@@ -23,6 +24,7 @@ from load_detector import load_detector
 from wc_onnx import get_onnx_diagnostics
 from wc_sleep_guard import prevent_sleep, allow_sleep
 import wc_models as models_mod
+import wc_output
 from PIL import Image
 
 resource_path = models_mod.resource_path
@@ -110,39 +112,77 @@ def _extract_video_time(filepath):
         return ""
 
 
-def _write_excel_report(path, records, total_files, total_empty,
-                        total_human, total_animal, species_counts):
-    """Write detection report as .xlsx with two sheets."""
-    from openpyxl import Workbook
+def _gps_to_decimal(dms, ref):
+    """Convert EXIF GPS (degrees, minutes, seconds) + hemisphere ref to decimal."""
+    try:
+        d, m, s = [float(x) for x in dms]
+        val = d + m / 60.0 + s / 3600.0
+        if str(ref).strip().upper().startswith(("S", "W")):
+            val = -val
+        return round(val, 6)
+    except Exception:
+        return ""
 
-    wb = Workbook()
 
-    # Sheet 1 — per-file details
-    ws = wb.active
-    ws.title = "File Details"
-    ws.append(["ID", "File Name", "Detection", "Species", "Time",
-               "Video Length (s)", "Detection Accuracy", "Species Accuracy"])
-    for r in records:
-        ws.append([
-            r["id"], r["file_name"], r["detection"], r["species"],
-            r["time"], r["video_length"],
-            r["detection_accuracy"], r["species_accuracy"],
-        ])
+def _extract_image_exif(filepath):
+    """Return dict with camera_make, camera_model, gps_latitude, gps_longitude."""
+    info = {"camera_make": "", "camera_model": "",
+            "gps_latitude": "", "gps_longitude": ""}
+    try:
+        with Image.open(filepath) as img:
+            exif = img.getexif()
+            if not exif:
+                return info
+            info["camera_make"] = str(exif.get(271, "")).strip()    # Make
+            info["camera_model"] = str(exif.get(272, "")).strip()   # Model
+            try:
+                gps = exif.get_ifd(0x8825)  # GPSInfo IFD
+                if gps:
+                    info["gps_latitude"] = _gps_to_decimal(gps.get(2), gps.get(1))
+                    info["gps_longitude"] = _gps_to_decimal(gps.get(4), gps.get(3))
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return info
 
-    # Sheet 2 — summary (same data as the old CSV)
-    ws2 = wb.create_sheet("Summary")
-    ws2.append(["Category", "Count"])
-    ws2.append(["Total files", total_files])
-    ws2.append(["Empty", total_empty])
-    ws2.append(["Human/Vehicle", total_human])
-    ws2.append(["Animal", total_animal])
-    if species_counts:
-        ws2.append([])
-        ws2.append(["Species", "Count"])
-        for sp in sorted(species_counts):
-            ws2.append([sp, species_counts[sp]])
 
-    wb.save(path)
+def _base_record(filepath, file_type):
+    """File-level fields common to every record."""
+    rec = {
+        "file_name": os.path.basename(filepath),
+        "full_path": os.path.abspath(filepath),
+        "file_type": file_type,
+    }
+    try:
+        st = os.stat(filepath)
+        rec["file_size_kb"] = round(st.st_size / 1024.0, 1)
+        rec["file_modified"] = datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        pass
+    return rec
+
+
+def _build_detail(filepath, file_type, time_str, det_label, species,
+                  det_conf, sp_acc, stats, extra=None):
+    """Assemble a full per-file record (superset of all exportable fields)."""
+    rec = _base_record(filepath, file_type)
+    sp_counts = stats.get("species", {})
+    rec.update({
+        "time": time_str,
+        "detection": det_label,
+        "species": species,
+        "detection_accuracy": round(det_conf, 4) if det_conf is not None else "",
+        "species_accuracy": round(sp_acc, 4) if sp_acc is not None else "",
+        "animal_count": stats.get("animal", 0),
+        "human_count": stats.get("human", 0),
+        "total_detections": stats.get("animal", 0) + stats.get("human", 0),
+        "species_all": ", ".join(sorted(sp_counts)),
+        "species_counts": ", ".join(f"{k}:{v}" for k, v in sorted(sp_counts.items())),
+    })
+    if extra:
+        rec.update(extra)
+    return rec
 
 
 def _filter_detections(detections, confidence, det_per_class):
@@ -280,9 +320,9 @@ def process_image_file(
     stats = {"empty": False, "human": 0, "animal": 0, "species": {}}
     fname = os.path.basename(image_file)
     image_time = _extract_image_time(image_file)
-    _empty_detail = {"file_name": fname, "detection": "", "species": "",
-                     "time": image_time, "video_length": "N/A",
-                     "detection_accuracy": "", "species_accuracy": ""}
+    exif = _extract_image_exif(image_file)
+    _empty_detail = _build_detail(image_file, "image", image_time, "", "",
+                                  None, None, stats, extra=exif)
 
     image = cv2.imread(image_file)
     if image is None:
@@ -290,6 +330,8 @@ def process_image_file(
         stats["empty"] = True
         stats["detail"] = _empty_detail
         return stats
+    _empty_detail["image_width"] = int(image.shape[1])
+    _empty_detail["image_height"] = int(image.shape[0])
 
     results = process_images(
         im_files=[image_file], detector=detector,
@@ -375,12 +417,12 @@ def process_image_file(
         dom = Counter(s for s, _ in classified_confs).most_common(1)[0][0]
         sp_label = dom
         sp_acc = max(c for s, c in classified_confs if s == dom)
-    stats["detail"] = {
-        "file_name": fname, "detection": det_label,
-        "species": sp_label, "time": image_time, "video_length": "N/A",
-        "detection_accuracy": round(best_det_conf, 4) if best_det_conf is not None else "",
-        "species_accuracy": round(sp_acc, 4) if sp_acc is not None else "",
-    }
+    stats["detail"] = _build_detail(
+        image_file, "image", image_time, det_label, sp_label,
+        best_det_conf, sp_acc, stats,
+        extra={**exif, "image_width": int(image.shape[1]),
+               "image_height": int(image.shape[0])},
+    )
 
     # Rename the original file with species or category prefix
     if classified_species:
@@ -426,9 +468,8 @@ def process_video_file(
     stats = {"empty": False, "human": 0, "animal": 0, "species": {}}
     fname = os.path.basename(video_file)
     video_time = _extract_video_time(video_file)
-    _empty_detail = {"file_name": fname, "detection": "", "species": "",
-                     "time": video_time, "video_length": "N/A",
-                     "detection_accuracy": "", "species_accuracy": ""}
+    _empty_detail = _build_detail(video_file, "video", video_time, "", "",
+                                  None, None, stats, extra={"video_length": "N/A"})
 
     cap = cv2.VideoCapture(video_file)
     if not cap.isOpened():
@@ -443,6 +484,7 @@ def process_video_file(
     total_frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
     video_duration = round(total_frame_count / fps, 1) if total_frame_count > 0 else "N/A"
     _empty_detail["video_length"] = video_duration
+    _empty_detail["video_fps"] = round(fps, 1)
     max_frames = int(max_duration * fps)
     temp_dir = tempfile.mkdtemp()
     frame_files = []
@@ -583,13 +625,12 @@ def process_video_file(
             dom = Counter(s for s, _ in classified_confs).most_common(1)[0][0]
             sp_label = dom
             sp_acc = max(c for s, c in classified_confs if s == dom)
-        stats["detail"] = {
-            "file_name": fname, "detection": det_label,
-            "species": sp_label, "time": video_time,
-            "video_length": video_duration,
-            "detection_accuracy": round(best_det_conf, 4) if best_det_conf is not None else "",
-            "species_accuracy": round(sp_acc, 4) if sp_acc is not None else "",
-        }
+        stats["detail"] = _build_detail(
+            video_file, "video", video_time, det_label, sp_label,
+            best_det_conf, sp_acc, stats,
+            extra={"video_length": video_duration, "video_fps": round(fps, 1),
+                   "frames_processed": len(frame_files)},
+        )
 
         # Rename original with species or category prefix
         if classified_species:
@@ -777,6 +818,16 @@ class ProcessingThread(QThread):
             records = []
             record_id = 0
 
+            # Names of models used this run (for the optional "Models Used" field)
+            _model_names = []
+            if detector_entry:
+                _model_names.append(detector_entry["name"])
+            for _s in classifier_steps:
+                _e = _resolve_entry(_s["model_id"])
+                if _e:
+                    _model_names.append(_e["name"])
+            models_used_str = ", ".join(_model_names)
+
             def _output_dir(filepath):
                 rel = os.path.relpath(os.path.dirname(filepath), cfg["input_folder"])
                 d = os.path.join(output_root, rel)
@@ -795,6 +846,15 @@ class ProcessingThread(QThread):
                 if detail:
                     record_id += 1
                     detail["id"] = record_id
+                    fp = detail.get("full_path")
+                    if fp:
+                        try:
+                            rel = os.path.relpath(os.path.dirname(fp), cfg["input_folder"])
+                        except Exception:
+                            rel = ""
+                        detail["relative_path"] = "" if rel == "." else rel
+                        detail["folder"] = detail["relative_path"]
+                    detail["models_used"] = models_used_str
                     records.append(detail)
 
             # Process images
@@ -835,32 +895,25 @@ class ProcessingThread(QThread):
                     f"{sp}={cnt}" for sp, cnt in sorted(species_counts.items())
                 ))
 
-            # Excel report (two sheets: per-file details + summary)
+            # Write report(s) in the client-selected format(s) with selected columns.
+            # Defaults reproduce the original detection_report.xlsx (back-compat).
             if not self._stop_requested:
-                xlsx_path = os.path.join(output_root, "detection_report.xlsx")
+                summary = {
+                    "total_files": self.total_files, "total_empty": total_empty,
+                    "total_human": total_human, "total_animal": total_animal,
+                    "species_counts": species_counts,
+                }
+                fields = cfg.get("output_fields") or wc_output.DEFAULT_FIELDS
+                formats = cfg.get("output_formats") or wc_output.DEFAULT_FORMATS
                 try:
-                    _write_excel_report(
-                        xlsx_path, records, self.total_files,
-                        total_empty, total_human, total_animal,
-                        species_counts,
+                    written = wc_output.write_reports(
+                        records, output_root, fields=fields, formats=formats,
+                        summary=summary, log=self.log,
                     )
-                    self.log(f"Report saved to {xlsx_path}")
-                except ImportError:
-                    self.log("openpyxl not installed — falling back to CSV report.")
-                    csv_path = os.path.join(output_root, "detection_report.csv")
-                    with open(csv_path, "w", newline="", encoding="utf-8") as f:
-                        w = csv.writer(f)
-                        w.writerow(["Category", "Count"])
-                        w.writerow(["Total files", self.total_files])
-                        w.writerow(["Empty", total_empty])
-                        w.writerow(["Human/Vehicle", total_human])
-                        w.writerow(["Animal", total_animal])
-                        if species_counts:
-                            w.writerow([])
-                            w.writerow(["Species", "Count"])
-                            for sp in sorted(species_counts):
-                                w.writerow([sp, species_counts[sp]])
-                    self.log(f"Report saved to {csv_path}")
+                    for p in written:
+                        self.log(f"Report saved → {os.path.basename(p)}")
+                    if not written:
+                        self.log("No report written (check selected formats).")
                 except Exception as e:
                     self.log(f"Report write failed: {e}")
 

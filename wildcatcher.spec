@@ -21,10 +21,12 @@ datas, binaries, hiddenimports = [], [], []
 # ---------------------------------------------------------------------------
 # Data files to bundle (src, dest_in_bundle)
 # ---------------------------------------------------------------------------
-# Only bundle paths that exist on this platform (e.g. the Windows-only vlc/ folder)
+# Only bundle paths that exist on this platform (e.g. the Windows-only vlc/ folder).
+# NOTE: the user `models/` folder is intentionally NOT bundled — it is read from
+# next to the executable at runtime (wc_models._ensure_models_dir) and populated
+# by installer.iss / build.bat, so bundling it here would be dead weight.
 _candidate_data = [
     ('detector_AI_model.onnx', '.'),   # built-in detector (ONNX), the only detector
-    ('models',                 'models'),  # registry + .onnx classifiers
     ('assets',                 'assets'),  # UI assets
     ('vlc',                    'vlc'),      # Windows VLC runtime (absent on macOS)
 ]

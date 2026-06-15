@@ -43,6 +43,7 @@ from wc_models import resource_path
 from wc_processing import ProcessingThread
 from wc_widgets import FolderDropViewer, ModelPipelineWidget
 from video_player import VideoPlayer
+import wc_output
 
 # Add yolov5 to path for detector
 yolov5_path = os.path.join(os.path.dirname(__file__), "yolov5")
@@ -311,6 +312,84 @@ class VideoDetectionApp(QMainWindow):
         # Model pipeline widget (handles all model-specific options)
         self.pipeline_widget = ModelPipelineWidget(trans=self.trans, parent=self)
 
+        # Output / Export customization section
+        self._sep2 = QFrame()
+        self._sep2.setFrameShape(QFrame.HLine)
+        self._sep2.setStyleSheet("color:#333;")
+        self._output_section = self._build_output_settings_widget()
+
+    def _build_output_settings_widget(self):
+        """A panel of checkboxes letting the client pick output formats + columns."""
+        trans = self.trans
+        container = QWidget()
+        container.setStyleSheet("font-size:12px;")  # avoid the 22px panel default
+        lay = QVBoxLayout()
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(3)
+        container.setLayout(lay)
+
+        header = QLabel(trans.get("output_export_header", "Output / Export"))
+        header.setStyleSheet("font-size:16px; color:#9bc472; font-weight:bold;")
+        lay.addWidget(header)
+
+        # --- Formats ---
+        fmt_label = QLabel(trans.get("output_formats_label", "Output format(s):"))
+        fmt_label.setStyleSheet("color:#9bc472; font-weight:bold;")
+        lay.addWidget(fmt_label)
+        self._format_checks = {}
+        for fmt in wc_output.ALL_FORMATS:
+            cb = QCheckBox(wc_output.FORMAT_LABELS.get(fmt, fmt))
+            cb.setStyleSheet("color:#DDD;")
+            cb.setChecked(fmt in wc_output.DEFAULT_FORMATS)
+            self._format_checks[fmt] = cb
+            lay.addWidget(cb)
+        note = QLabel(trans.get("timelapse_note",
+                                "Timelapse .ddb/.tdb is experimental — open it in "
+                                "Timelapse to verify."))
+        note.setStyleSheet("color:#888; font-size:10px;")
+        note.setWordWrap(True)
+        lay.addWidget(note)
+
+        # --- Fields, grouped ---
+        fld_label = QLabel(trans.get("output_fields_label", "Columns to include:"))
+        fld_label.setStyleSheet("color:#9bc472; font-weight:bold; margin-top:6px;")
+        lay.addWidget(fld_label)
+        self._field_checks = {}
+        groups = wc_output.fields_by_group()
+        for g in wc_output.GROUP_ORDER:
+            items = groups.get(g) or []
+            if not items:
+                continue
+            glabel = QLabel(trans.get("group_" + g, wc_output.GROUP_LABELS.get(g, g)))
+            glabel.setStyleSheet("color:#7fae5e; font-size:11px; font-weight:bold; margin-top:4px;")
+            lay.addWidget(glabel)
+            for key, header_txt, _i18n in items:
+                cb = QCheckBox(header_txt)
+                cb.setStyleSheet("color:#DDD;")
+                cb.setChecked(key in wc_output.DEFAULT_FIELDS)
+                self._field_checks[key] = cb
+                lay.addWidget(cb)
+        return container
+
+    def _get_output_config(self):
+        """Read the selected fields (in registry order) and formats from the GUI."""
+        if not hasattr(self, "_field_checks"):
+            return list(wc_output.DEFAULT_FIELDS), list(wc_output.DEFAULT_FORMATS)
+        fields = [k for (k, _h, _g, _i) in wc_output.FIELDS
+                  if self._field_checks.get(k) and self._field_checks[k].isChecked()]
+        formats = [f for f in wc_output.ALL_FORMATS
+                   if self._format_checks.get(f) and self._format_checks[f].isChecked()]
+        return (fields or list(wc_output.DEFAULT_FIELDS),
+                formats or list(wc_output.DEFAULT_FORMATS))
+
+    def _apply_output_config(self, fields, formats):
+        if not hasattr(self, "_field_checks"):
+            return
+        for k, cb in self._field_checks.items():
+            cb.setChecked(k in fields)
+        for f, cb in self._format_checks.items():
+            cb.setChecked(f in formats)
+
     def _init_settings_panel(self):
         """Populate settings panel layout with widgets."""
         # Clear
@@ -334,6 +413,8 @@ class VideoDetectionApp(QMainWindow):
             self.save_all_checkbox,
             self.remove_prefixes_button,
             self._sep,
+            self._output_section,
+            self._sep2,
             self.pipeline_widget,
         ]
         for w in widgets:
@@ -405,6 +486,10 @@ class VideoDetectionApp(QMainWindow):
         s.setValue("language_index", self.current_language_index)
         # Save pipeline (includes all per-model options)
         s.setValue("pipeline_steps", json.dumps(self.pipeline_widget.get_pipeline_config()))
+        # Save output/export customization
+        out_fields, out_formats = self._get_output_config()
+        s.setValue("output_fields", json.dumps(out_fields))
+        s.setValue("output_formats", json.dumps(out_formats))
         # Save splitter sizes
         s.setValue("v_splitter_sizes", self.v_splitter.sizes())
 
@@ -413,6 +498,17 @@ class VideoDetectionApp(QMainWindow):
         self.frame_interval_spinbox.setValue(int(s.value("frame_interval", 16)))
         self.processing_duration_spinbox.setValue(int(s.value("processing_duration", 5)))
         self.save_all_checkbox.setChecked(s.value("save_all_frames", "false") == "true")
+        # Restore output/export customization (fall back to back-compat defaults)
+        try:
+            of = json.loads(s.value("output_fields", "null"))
+        except Exception:
+            of = None
+        try:
+            ofm = json.loads(s.value("output_formats", "null"))
+        except Exception:
+            ofm = None
+        self._apply_output_config(of or wc_output.DEFAULT_FIELDS,
+                                  ofm or wc_output.DEFAULT_FORMATS)
         lang_idx = int(s.value("language_index", 0))
         if 0 <= lang_idx < len(LANGUAGES):
             self.current_language_index = lang_idx
@@ -583,12 +679,15 @@ class VideoDetectionApp(QMainWindow):
         self.start_button.setStyleSheet(STOP_BUTTON_STYLE)
         self.progress_bar.setValue(0)
 
+        out_fields, out_formats = self._get_output_config()
         config = {
             "input_folder": folder,
             "every_n_frames": self.frame_interval_spinbox.value(),
             "processing_duration_seconds": self.processing_duration_spinbox.value(),
             "save_all": self.save_all_checkbox.isChecked(),
             "pipeline_steps": self.pipeline_widget.get_pipeline_config(),
+            "output_fields": out_fields,
+            "output_formats": out_formats,
         }
 
         self.processing_thread = ProcessingThread(config)

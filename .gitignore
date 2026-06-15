@@ -36,8 +36,12 @@ license.wcl
 # Generated ONNX models (derived from .pt/.pth at build/import time; not committed)
 *.onnx
 
-# Smoke-test scratch files
+# Smoke-test / GUI-test scratch files
 _smoke_*.txt
+_gui_*.txt
+
+# Build output / installer artifacts (regenerable)
+installer_output/
 
 # Local test footage (copied user data)
 sample_footage/
