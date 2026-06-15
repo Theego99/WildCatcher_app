@@ -29,9 +29,20 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install torch torchvision
+          # CPU torch (conversion only). 2.7.1 = legacy ONNX exporter, no onnxscript needed.
+          pip install torch==2.7.1 torchvision==0.22.1
           pip install -r requirements-base.txt
           pip install pyinstaller
+
+      - name: Verify ONNX Runtime providers
+        run: python -c "import onnxruntime as ort; print('ORT', ort.__version__); print(ort.get_available_providers())"
+
+      - name: Convert built-in detector to ONNX (build-time only)
+        # ultralytics is needed only to load the YOLOv5 .pt for conversion; it is
+        # NOT bundled into the app (the spec excludes it).
+        run: |
+          pip install ultralytics
+          python tools/convert_to_onnx.py
 
       - name: Build with PyInstaller
         run: pyinstaller wildcatcher.spec
@@ -49,8 +60,12 @@ jobs:
           name: WildCatcher macOS ${{ github.ref_name }}
           body: |
             ### macOS Download
-            GPU acceleration is automatic on Apple Silicon (M1/M2/M3/M4) via MPS.
+            GPU acceleration is automatic on Apple Silicon (M1/M2/M3/M4) via
+            ONNX Runtime's CoreML provider; falls back to CPU otherwise.
+
+            **Note:** for video playback, install [VLC](https://www.videolan.org/vlc/)
+            (detection/classification does not require it).
 
             **Install:** Download → Extract → Run `WildCatcher`
-            If macOS says "app is damaged": `xattr -cr /path/to/WildCatcher.app`
+            If macOS says "app is damaged": `xattr -cr /path/to/WildCatcher`
           files: WildCatcher-macOS-arm64.zip

@@ -29,13 +29,22 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install torch torchvision
+          # CPU-only torch: used only to convert user-added models to ONNX, not for inference.
+          # Pinned to 2.7.1 (legacy ONNX exporter; newer torch needs the extra onnxscript dep).
+          pip install torch==2.7.1 torchvision==0.22.1 --index-url https://download.pytorch.org/whl/cpu
           pip install -r requirements-base.txt
           pip install pyinstaller
 
-      - name: Verify torch works
+      - name: Verify ONNX Runtime GPU provider
         run: |
-          python -c "import torch; print(f'Torch {torch.__version__}'); print(f'CUDA available: {torch.cuda.is_available()}')"
+          python -c "import onnxruntime as ort; print('ORT', ort.__version__); print('providers', ort.get_available_providers())"
+
+      - name: Convert built-in detector to ONNX (build-time only)
+        # ultralytics is needed only to load the YOLOv5 .pt for conversion; it is
+        # NOT bundled into the app (the spec excludes it).
+        run: |
+          pip install ultralytics
+          python tools/convert_to_onnx.py
 
       - name: Build with PyInstaller
         run: pyinstaller wildcatcher.spec
@@ -71,8 +80,8 @@ jobs:
           name: WildCatcher Windows ${{ github.ref_name }}
           body: |
             ### Windows Download
-            Includes CUDA support for NVIDIA GPU acceleration.
-            Falls back to CPU automatically if no NVIDIA GPU found.
+            GPU-accelerated via DirectML — works on any DirectX 12 GPU
+            (NVIDIA, AMD, Intel). Falls back to CPU automatically if none found.
 
             **Install:**
             1. Download `WildCatcher-Windows-x64.7z`

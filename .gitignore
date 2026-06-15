@@ -33,5 +33,11 @@ license.wcl
 # Large model files — use Git LFS for these
 # *.pt
 
+# Generated ONNX models (derived from .pt/.pth at build/import time; not committed)
+*.onnx
+
+# Smoke-test scratch files
+_smoke_*.txt
+
 # Output data
 detection_data/

@@ -370,15 +370,12 @@ class PipelineStepWidget(QFrame):
                 # No class names — show input to set them
                 self._clear_class_grid()
                 num_hint = ""
-                path = models_mod.get_model_path(entry)
-                if os.path.isfile(path):
-                    info = models_mod._probe_checkpoint(path)
-                    nc = info.get("num_classes")
-                    if nc is not None:
-                        expected = 2 if nc == 1 else nc
-                        num_hint = " " + self.trans.get(
-                            "class_names_expected", "({n} class names expected)"
-                        ).format(n=expected)
+                nc = entry.get("num_classes") or entry.get("output_dim")
+                if nc is not None:
+                    expected = 2 if nc == 1 else nc
+                    num_hint = " " + self.trans.get(
+                        "class_names_expected", "({n} class names expected)"
+                    ).format(n=expected)
                 no_msg = self.trans.get("no_class_info_msg",
                                         "No class information available")
                 below_msg = self.trans.get("enter_class_names_below",

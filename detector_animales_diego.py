@@ -16,6 +16,10 @@ import json
 import logging
 import shutil
 
+# Import onnxruntime BEFORE PyQt5: on Windows the Qt DLLs conflict with
+# onnxruntime-directml's DLL initialization unless ORT is loaded first.
+import onnxruntime  # noqa: F401
+
 from PyQt5 import QtWidgets, QtGui
 from PyQt5.QtCore import QSettings, Qt, QSize
 from PyQt5.QtGui import QIcon, QFont, QPalette, QColor, QPixmap

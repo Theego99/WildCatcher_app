@@ -20,7 +20,7 @@ from PyQt5.QtCore import QThread, pyqtSignal
 
 from process_images import process_images
 from load_detector import load_detector
-from wc_gpu import get_gpu_diagnostics
+from wc_onnx import get_onnx_diagnostics
 from wc_sleep_guard import prevent_sleep, allow_sleep
 import wc_models as models_mod
 from PIL import Image
@@ -661,7 +661,7 @@ class ProcessingThread(QThread):
     def _process(self):
         cfg = self.cfg
         try:
-            for line in get_gpu_diagnostics():
+            for line in get_onnx_diagnostics():
                 self.log(line)
 
             # Always create detection_data folder
