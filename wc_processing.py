@@ -137,8 +137,10 @@ def _extract_image_exif(filepath):
             exif = img.getexif()
             if not exif:
                 return info
-            info["camera_make"] = str(exif.get(271, "")).strip()    # Make
-            info["camera_model"] = str(exif.get(272, "")).strip()   # Model
+            # Some cameras NUL-pad these fixed-length EXIF strings; strip them
+            # (embedded \x00 crashes csv.writer / openpyxl downstream).
+            info["camera_make"] = str(exif.get(271, "")).replace("\x00", "").strip()   # Make
+            info["camera_model"] = str(exif.get(272, "")).replace("\x00", "").strip()  # Model
             try:
                 gps = exif.get_ifd(0x8825)  # GPSInfo IFD
                 if gps:

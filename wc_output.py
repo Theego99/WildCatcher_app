@@ -17,10 +17,24 @@ A "record" is a flat dict keyed by the field keys below; missing keys export
 as empty, so the processing layer can populate whatever it has.
 """
 import os
+import re
 import csv
 import json
 import sqlite3
 from datetime import datetime
+
+# Control characters that crash csv.writer ("need to escape, but no escapechar
+# set") and openpyxl (IllegalCharacterError). Trail cameras (e.g. BUSHNELL)
+# commonly NUL-pad EXIF Make/Model fields, so strip these before writing.
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def _clean_cell(v):
+    """Strip control chars from string values; pass everything else through."""
+    if isinstance(v, str):
+        cleaned = _CONTROL_CHARS.sub("", v)
+        return cleaned.rstrip() if cleaned != v else v
+    return v
 
 # ---------------------------------------------------------------------------
 # Field registry
@@ -118,7 +132,7 @@ def _headers(fields):
 
 
 def _row(record, fields):
-    return [record.get(k, "") for k in fields]
+    return [_clean_cell(record.get(k, "")) for k in fields]
 
 
 # ---------------------------------------------------------------------------
@@ -133,7 +147,7 @@ def write_csv(path, records, fields):
 
 
 def write_json(path, records, fields):
-    data = [{k: r.get(k, "") for k in fields} for r in records]
+    data = [{k: _clean_cell(r.get(k, "")) for k in fields} for r in records]
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False, default=str)
 
@@ -206,7 +220,7 @@ def write_sqlite(path, records, fields):
         placeholders = ",".join("?" * len(fields))
         con.executemany(
             f"INSERT INTO detections VALUES ({placeholders})",
-            [tuple(str(r.get(k, "")) for k in fields) for r in records],
+            [tuple(_clean_cell(str(r.get(k, ""))) for k in fields) for r in records],
         )
         con.commit()
     finally:
@@ -290,7 +304,7 @@ def write_timelapse(out_dir, records):
         placeholders = ",".join("?" * len(data_labels))
         rows = []
         for r in records:
-            rows.append((
+            rows.append(tuple(_clean_cell(v) for v in (
                 r.get("file_name", ""),
                 r.get("relative_path", "") or r.get("folder", ""),
                 r.get("time", ""),
@@ -299,7 +313,7 @@ def write_timelapse(out_dir, records):
                 str(r.get("animal_count", "") or 0),
                 str(r.get("detection_accuracy", "")),
                 r.get("detection", "") or "empty",
-            ))
+            )))
         con.executemany(
             f'INSERT INTO DataTable ({", ".join(data_labels)}) VALUES ({placeholders})',
             rows,
