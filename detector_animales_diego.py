@@ -387,6 +387,17 @@ class VideoDetectionApp(QMainWindow):
 
         self.save_all_checkbox = QCheckBox("Save All Frames")
 
+        self.resume_checkbox = QCheckBox("Skip already-processed files (resume)")
+        self.resume_checkbox.setChecked(True)
+        self.resume_checkbox.setToolTip(
+            "Re-running a folder skips files already processed. Lets a large or "
+            "interrupted job resume instead of starting over.")
+
+        self.nondestructive_checkbox = QCheckBox("Non-destructive (keep original file names)")
+        self.nondestructive_checkbox.setToolTip(
+            "Do not rename or delete original files. Results go to the report and "
+            "detection_data only. Recommended when originals must be preserved.")
+
         # Remove Tags button (uses hardcoded prefixes)
         self.remove_prefixes_button = QPushButton("Remove Tags from All File Names")
         self.remove_prefixes_button.clicked.connect(self.remove_prefixes_from_files)
@@ -511,6 +522,8 @@ class VideoDetectionApp(QMainWindow):
             self.frame_interval_label, self.frame_interval_spinbox,
             self.processing_duration_label, self.processing_duration_spinbox,
             self.save_all_checkbox,
+            self.resume_checkbox,
+            self.nondestructive_checkbox,
             self.remove_prefixes_button,
             self._sep,
             self._output_section,
@@ -524,7 +537,8 @@ class VideoDetectionApp(QMainWindow):
         default_styled = {
             self.frame_interval_label, self.frame_interval_spinbox,
             self.processing_duration_label, self.processing_duration_spinbox,
-            self.save_all_checkbox, self.remove_prefixes_button,
+            self.save_all_checkbox, self.resume_checkbox,
+            self.nondestructive_checkbox, self.remove_prefixes_button,
         }
         self._settings_default_widgets = []
         for w in widgets:
@@ -662,6 +676,8 @@ class VideoDetectionApp(QMainWindow):
         s.setValue("frame_interval", self.frame_interval_spinbox.value())
         s.setValue("processing_duration", self.processing_duration_spinbox.value())
         s.setValue("save_all_frames", self.save_all_checkbox.isChecked())
+        s.setValue("resume_processing", self.resume_checkbox.isChecked())
+        s.setValue("non_destructive", self.nondestructive_checkbox.isChecked())
         s.setValue("language_index", self.current_language_index)
         s.setValue("ui_scale", self.ui_scale)
         # Save pipeline (includes all per-model options)
@@ -685,6 +701,8 @@ class VideoDetectionApp(QMainWindow):
         self.frame_interval_spinbox.setValue(int(s.value("frame_interval", 16)))
         self.processing_duration_spinbox.setValue(int(s.value("processing_duration", 5)))
         self.save_all_checkbox.setChecked(s.value("save_all_frames", "false") == "true")
+        self.resume_checkbox.setChecked(s.value("resume_processing", "true") == "true")
+        self.nondestructive_checkbox.setChecked(s.value("non_destructive", "false") == "true")
         # Restore output/export customization (fall back to back-compat defaults)
         try:
             of = json.loads(s.value("output_fields", "null"))
@@ -759,6 +777,10 @@ class VideoDetectionApp(QMainWindow):
             self.frame_interval_label.setText(trans["frame_interval_label"])
             self.processing_duration_label.setText(trans["processing_duration_label"])
             self.save_all_checkbox.setText(trans["save_all_checkbox"])
+            self.resume_checkbox.setText(trans.get(
+                "resume_checkbox", "Skip already-processed files (resume)"))
+            self.nondestructive_checkbox.setText(trans.get(
+                "nondestructive_checkbox", "Non-destructive (keep original file names)"))
             self.remove_prefixes_button.setText(trans["remove_prefixes_button"])
             self.remove_prefixes_button.setText(trans["remove_prefixes_button"])
 
@@ -982,6 +1004,8 @@ class VideoDetectionApp(QMainWindow):
             "output_fields": out_fields,
             "output_formats": out_formats,
             "entitlements": e.as_config(),
+            "resume": self.resume_checkbox.isChecked(),
+            "non_destructive": self.nondestructive_checkbox.isChecked(),
         }
 
         self.progress_detail_label.setVisible(True)

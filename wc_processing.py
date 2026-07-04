@@ -12,10 +12,8 @@ import os
 import csv
 import json
 import time
-import shutil
 import logging
 import subprocess
-import tempfile
 from datetime import datetime
 
 _log = logging.getLogger("wildcatcher.processing")
@@ -48,6 +46,57 @@ VIDEO_EXTENSIONS = {
     ".mp4", ".avi", ".mov", ".mkv", ".wmv", ".flv",
     ".mpg", ".mpeg", ".mts", ".m4v", ".3gp", ".asf",
 }
+
+
+# ---------------------------------------------------------------------------
+# Resume / skip-already-processed  (manifest keyed by a rename-proof signature)
+# ---------------------------------------------------------------------------
+import hashlib
+
+MANIFEST_NAME = ".wc_manifest.json"
+
+
+def _file_signature(path):
+    """A rename-proof, content-aware file identity: size + mtime + head hash.
+    Survives WildCatcher's rename-with-prefix (content unchanged) but changes if
+    the file is edited/replaced."""
+    try:
+        st = os.stat(path)
+        h = hashlib.md5()
+        h.update(str(st.st_size).encode())
+        with open(path, "rb") as f:
+            h.update(f.read(65536))
+        return f"{st.st_size}:{int(st.st_mtime)}:{h.hexdigest()[:16]}"
+    except Exception:
+        return None
+
+
+def _load_manifest(output_root):
+    path = os.path.join(output_root, MANIFEST_NAME)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return set(data.get("processed", []))
+    except Exception:
+        return set()
+
+
+def _save_manifest(output_root, processed):
+    path = os.path.join(output_root, MANIFEST_NAME)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"processed": sorted(processed)}, f)
+    except Exception as e:
+        _log.info("manifest save failed: %s", e)
+
+
+def _strip_known_prefix(fname, known_prefixes):
+    """Remove a single leading WildCatcher tag so re-runs replace rather than
+    stack it (animal_x -> x, then correct tag re-applied). Idempotent."""
+    for pfx in known_prefixes:
+        if pfx and fname.startswith(pfx):
+            return fname[len(pfx):]
+    return fname
 
 
 def crop_image(image, bbox):
@@ -220,7 +269,7 @@ PREFIX_EMPTY = "empty_"
 # ---------------------------------------------------------------------------
 def _classify_and_sort_crop(
     crop_path, crop_name, output_dir, detection,
-    classifier_steps, stats, log, original_path=None,
+    classifier_steps, stats, log, original_path=None, non_destructive=False,
 ):
     """
     Run all classifier steps on a single crop.
@@ -256,8 +305,8 @@ def _classify_and_sort_crop(
 
             log(f"  → {species} ({conf:.1%})")
 
-            # Delete original source?
-            if class_opts.get("delete_original", False):
+            # Delete original source? (never in non-destructive mode)
+            if class_opts.get("delete_original", False) and not non_destructive:
                 if original_path and os.path.exists(original_path):
                     try:
                         os.remove(original_path)
@@ -325,9 +374,10 @@ def _safe_write_crop(path, image, log):
 def process_image_file(
     image_file, detector, det_confidence, det_per_class,
     output_dir, log,
-    classifier_steps=None,
+    classifier_steps=None, non_destructive=False, known_prefixes=None,
 ):
     """Process one image. Returns stats dict with per-file detail."""
+    known_prefixes = known_prefixes or ()
     stats = {"empty": False, "human": 0, "animal": 0, "species": {}}
     fname = os.path.basename(image_file)
     image_time = _extract_image_time(image_file)
@@ -355,15 +405,15 @@ def process_image_file(
         stats["empty"] = True
         # Handle "empty" per_class options
         empty_opts = det_per_class.get("empty", {})
-        if empty_opts.get("delete_original", False):
+        if empty_opts.get("delete_original", False) and not non_destructive:
             try:
                 os.remove(image_file)
                 log(f"Deleted (no detections): {fname}")
             except Exception as e:
                 log(f"Delete failed: {e}")
-        else:
-            # Rename with empty_ prefix
-            new_name = PREFIX_EMPTY + fname
+        elif not non_destructive:
+            # Rename with empty_ prefix (replace any existing WC tag)
+            new_name = PREFIX_EMPTY + _strip_known_prefix(fname, known_prefixes)
             new_path = os.path.join(os.path.dirname(image_file), new_name)
             if not os.path.exists(new_path):
                 try:
@@ -403,7 +453,7 @@ def process_image_file(
                 sp, sp_conf, _ = _classify_and_sort_crop(
                     crop_path, crop_name, output_dir, det,
                     classifier_steps, stats, log,
-                    original_path=current_file,
+                    original_path=current_file, non_destructive=non_destructive,
                 )
                 if sp:
                     classified_species.append(sp)
@@ -445,18 +495,21 @@ def process_image_file(
     else:
         prefix = PREFIX_HUMAN
 
-    new_name = prefix + fname
-    new_path = os.path.join(os.path.dirname(current_file), new_name)
-    if not os.path.exists(new_path):
-        try:
-            os.rename(current_file, new_path)
-        except Exception as e:
-            log(f"Rename failed for {fname}: {e}")
+    new_path = current_file
+    if not non_destructive:
+        new_name = prefix + _strip_known_prefix(fname, known_prefixes)
+        new_path = os.path.join(os.path.dirname(current_file), new_name)
+        if os.path.abspath(new_path) != os.path.abspath(current_file) and not os.path.exists(new_path):
+            try:
+                os.rename(current_file, new_path)
+            except Exception as e:
+                log(f"Rename failed for {fname}: {e}")
+                new_path = current_file
 
     # Handle per-class delete_original for detector categories
     det_category = "animal" if detections[-1]["category"] == "1" else "human"
     cat_opts = det_per_class.get(det_category, {})
-    if cat_opts.get("delete_original", False):
+    if cat_opts.get("delete_original", False) and not non_destructive:
         # Delete the renamed file (or original if rename failed)
         target = new_path if os.path.exists(new_path) else current_file
         if os.path.exists(target):
@@ -473,9 +526,10 @@ def process_video_file(
     video_file, detector, det_confidence, det_per_class,
     output_dir, log,
     every_n_frames=16, max_duration=10, save_all=False,
-    classifier_steps=None,
+    classifier_steps=None, non_destructive=False, known_prefixes=None,
 ):
     """Process one video. Returns stats dict with per-file detail."""
+    known_prefixes = known_prefixes or ()
     stats = {"empty": False, "human": 0, "animal": 0, "species": {}}
     fname = os.path.basename(video_file)
     video_time = _extract_video_time(video_file)
@@ -497,8 +551,8 @@ def process_video_file(
     _empty_detail["video_length"] = video_duration
     _empty_detail["video_fps"] = round(fps, 1)
     max_frames = int(max_duration * fps)
-    temp_dir = tempfile.mkdtemp()
-    frame_files = []
+    # Sample frames straight into memory — no per-frame temp JPEGs on disk.
+    frames = []
 
     try:
         count = 0
@@ -510,20 +564,19 @@ def process_video_file(
             if count > max_frames:
                 break
             if count % every_n_frames == 0:
-                fp = os.path.join(temp_dir, f"frame_{count}.jpg")
-                cv2.imwrite(fp, frame)
-                frame_files.append(fp)
-        cap.release()
+                frames.append(frame)  # BGR (kept for cropping/saving)
 
-        if not frame_files:
+        if not frames:
             stats["empty"] = True
             stats["detail"] = _empty_detail
             return stats
 
-        results = process_images(
-            im_files=frame_files, detector=detector,
-            confidence_threshold=0.0, use_image_queue=False, quiet=True,
-        )
+        # Detector wants RGB; convert a view per frame, keep BGR for crops.
+        results = []
+        for fr in frames:
+            rgb = cv2.cvtColor(fr, cv2.COLOR_BGR2RGB)
+            results.append(detector.generate_detections_one_image(
+                rgb, video_file, detection_threshold=0.0))
 
         best_det, best_frame, best_conf = None, None, -1
         frames_with_dets = []
@@ -533,7 +586,7 @@ def process_video_file(
                 res.get("detections", []), det_confidence, det_per_class,
             )
             if valid:
-                frame = cv2.imread(frame_files[i])
+                frame = frames[i]
                 if save_all and output_dir:
                     frames_with_dets.append((frame, valid))
                 else:
@@ -547,14 +600,14 @@ def process_video_file(
         if not has_dets:
             stats["empty"] = True
             empty_opts = det_per_class.get("empty", {})
-            if empty_opts.get("delete_original", False):
+            if empty_opts.get("delete_original", False) and not non_destructive:
                 try:
                     os.remove(video_file)
                     log(f"Deleted (no detections): {fname}")
                 except Exception as e:
                     log(f"Delete failed: {e}")
-            else:
-                new_name = PREFIX_EMPTY + fname
+            elif not non_destructive:
+                new_name = PREFIX_EMPTY + _strip_known_prefix(fname, known_prefixes)
                 new_path = os.path.join(os.path.dirname(video_file), new_name)
                 if not os.path.exists(new_path):
                     try:
@@ -600,6 +653,7 @@ def process_video_file(
                                     cp, cn, output_dir, det,
                                     classifier_steps, stats, log,
                                     original_path=current_file,
+                                    non_destructive=non_destructive,
                                 )
                                 if sp:
                                     classified_species.append(sp)
@@ -615,6 +669,7 @@ def process_video_file(
                             cp, cn, output_dir, best_det,
                             classifier_steps, stats, log,
                             original_path=current_file,
+                            non_destructive=non_destructive,
                         )
                         if sp:
                             classified_species.append(sp)
@@ -640,7 +695,7 @@ def process_video_file(
             video_file, "video", video_time, det_label, sp_label,
             best_det_conf, sp_acc, stats,
             extra={"video_length": video_duration, "video_fps": round(fps, 1),
-                   "frames_processed": len(frame_files)},
+                   "frames_processed": len(frames)},
         )
 
         # Rename original with species or category prefix
@@ -653,20 +708,21 @@ def process_video_file(
         else:
             prefix = PREFIX_HUMAN
 
-        new_name = prefix + fname
-        new_path = os.path.join(os.path.dirname(video_file), new_name)
-        if not os.path.exists(new_path):
-            try:
-                os.rename(current_file, new_path)
-                current_file = new_path
-                fname = new_name
-            except Exception as e:
-                log(f"Rename failed for {fname}: {e}")
+        if not non_destructive:
+            new_name = prefix + _strip_known_prefix(fname, known_prefixes)
+            new_path = os.path.join(os.path.dirname(video_file), new_name)
+            if os.path.abspath(new_path) != os.path.abspath(current_file) and not os.path.exists(new_path):
+                try:
+                    os.rename(current_file, new_path)
+                    current_file = new_path
+                    fname = new_name
+                except Exception as e:
+                    log(f"Rename failed for {fname}: {e}")
 
         # Handle per-class delete_original for detector categories
         det_category = "animal" if all_dets[-1]["category"] == "1" else "human"
         cat_opts = det_per_class.get(det_category, {})
-        if cat_opts.get("delete_original", False):
+        if cat_opts.get("delete_original", False) and not non_destructive:
             target = new_path if os.path.exists(new_path) else current_file
             if os.path.exists(target):
                 try:
@@ -676,7 +732,7 @@ def process_video_file(
                     log(f"Delete failed: {e}")
 
     finally:
-        shutil.rmtree(temp_dir, ignore_errors=True)
+        cap.release()
 
     return stats
 
@@ -813,6 +869,19 @@ class ProcessingThread(QThread):
                     "empty": {"include": False, "delete_original": False},
                 }
 
+            non_destructive = bool(cfg.get("non_destructive", False))
+            resume = bool(cfg.get("resume", True))
+            if non_destructive:
+                self.log("Non-destructive mode: originals will NOT be renamed or deleted.")
+
+            # Known WildCatcher tags (so re-runs replace rather than stack them).
+            known_prefixes = [PREFIX_ANIMAL, PREFIX_HUMAN, PREFIX_EMPTY]
+            for _e in models_mod.get_all_models():
+                for _cn in (_e.get("class_names") or []):
+                    p = f"{_cn}_"
+                    if p not in known_prefixes:
+                        known_prefixes.append(p)
+
             # --- Entitlement gating (belt-and-suspenders; UI also gates) ---
             ent = wc_entitlements.from_config(cfg.get("entitlements"))
             if classifier_steps and not ent.has(wc_entitlements.FEATURE_CLASSIFY):
@@ -860,6 +929,13 @@ class ProcessingThread(QThread):
                     except Exception as e:
                         self.log(f"  Failed to load classifier '{entry['name']}': {e}")
 
+            # Resume support: signatures of files already processed in a prior
+            # run of THIS folder. Rename-proof (content hash), so re-runs and
+            # crash-resume both skip completed work.
+            manifest = _load_manifest(output_root) if resume else set()
+            self._manifest = set(manifest)
+            already_done = 0
+
             # Gather ALL files  (Issue #2 fix — no prefix skipping)
             image_files, video_files = [], []
             skipped_exts = {}
@@ -869,12 +945,20 @@ class ProcessingThread(QThread):
                 for f in files:
                     ext = os.path.splitext(f)[1].lower()
                     path = os.path.join(root, f)
+                    if ext not in IMAGE_EXTENSIONS and ext not in VIDEO_EXTENSIONS:
+                        if ext:
+                            skipped_exts[ext] = skipped_exts.get(ext, 0) + 1
+                        continue
+                    if resume and _file_signature(path) in manifest:
+                        already_done += 1
+                        continue
                     if ext in IMAGE_EXTENSIONS:
                         image_files.append(path)
-                    elif ext in VIDEO_EXTENSIONS:
+                    else:
                         video_files.append(path)
-                    elif ext:
-                        skipped_exts[ext] = skipped_exts.get(ext, 0) + 1
+            if already_done:
+                self.log(f"Resume: skipping {already_done} file(s) already processed "
+                         f"(clear detection_data/{MANIFEST_NAME} to reprocess).")
 
             self.total_files = len(image_files) + len(video_files)
             self.log(f"Found {len(image_files)} images, {len(video_files)} videos ({self.total_files} total)")
@@ -976,18 +1060,24 @@ class ProcessingThread(QThread):
                 if self._stop_requested:
                     self.log("Stopped by user.")
                     break
+                sig = _file_signature(fpath)
                 try:
                     fs = process_image_file(
                         fpath, detector, det_confidence, det_per_class,
                         _output_dir(fpath), self.log,
                         classifier_steps=classifier_steps or None,
+                        non_destructive=non_destructive, known_prefixes=known_prefixes,
                     )
                 except Exception as e:
                     self.error_files += 1
                     self.log(f"  ⚠ Skipped (error) {os.path.basename(fpath)}: {e}")
                     fs = _error_record(fpath, "image", e)
                 _accum(fs)
+                if sig:
+                    self._manifest.add(sig)
                 self.processed_count += 1
+                if resume and self.processed_count % 50 == 0:
+                    _save_manifest(output_root, self._manifest)
                 self._emit_progress(os.path.basename(fpath))
 
             # Process videos (same per-file isolation).
@@ -995,6 +1085,7 @@ class ProcessingThread(QThread):
                 if self._stop_requested:
                     self.log("Stopped by user.")
                     break
+                sig = _file_signature(fpath)
                 try:
                     fs = process_video_file(
                         fpath, detector, det_confidence, det_per_class,
@@ -1003,14 +1094,23 @@ class ProcessingThread(QThread):
                         max_duration=cfg.get("processing_duration_seconds", 10),
                         save_all=cfg.get("save_all", False),
                         classifier_steps=classifier_steps or None,
+                        non_destructive=non_destructive, known_prefixes=known_prefixes,
                     )
                 except Exception as e:
                     self.error_files += 1
                     self.log(f"  ⚠ Skipped (error) {os.path.basename(fpath)}: {e}")
                     fs = _error_record(fpath, "video", e)
                 _accum(fs)
+                if sig:
+                    self._manifest.add(sig)
                 self.processed_count += 1
+                if resume and self.processed_count % 50 == 0:
+                    _save_manifest(output_root, self._manifest)
                 self._emit_progress(os.path.basename(fpath))
+
+            # Persist the resume manifest (final flush).
+            if resume:
+                _save_manifest(output_root, self._manifest)
 
             # Summary log
             self.log(f"--- Results: {total_animal} animals, {total_human} humans/vehicles, "
