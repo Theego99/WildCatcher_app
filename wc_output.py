@@ -139,26 +139,60 @@ def write_json(path, records, fields):
 
 
 def write_xlsx(path, records, fields, summary=None):
+    """
+    Two tabs:
+      - "Summary"      : whole-batch totals (animals/humans/empty + per species)
+      - "File Details" : one row per processed image/video, user-selected columns
+    """
     from openpyxl import Workbook
+    from openpyxl.styles import Font
+    bold = Font(bold=True)
     wb = Workbook()
+
+    # --- Sheet 1: Summary (batch as a whole) ---
     ws = wb.active
-    ws.title = "File Details"
-    ws.append(_headers(fields))
+    ws.title = "Summary"
+
+    def _bold_row(*vals):
+        ws.append(list(vals))
+        for cell in ws[ws.max_row]:
+            cell.font = bold
+
+    s = summary or {}
+    _bold_row("WildCatcher — Batch Summary")
+    ws.append([])
+    _bold_row("Metric", "Value")
+    ws.append(["Total files found", s.get("total_files", len(records))])
+    ws.append(["Files in report", s.get("total_processed", len(records))])
+    ws.append(["Animals", s.get("total_animal", 0)])
+    ws.append(["Humans / Vehicles", s.get("total_human", 0)])
+    ws.append(["Empty (no detection)", s.get("total_empty", 0)])
+    if s.get("total_errors"):
+        ws.append(["Files skipped (errors)", s.get("total_errors", 0)])
+    if s.get("stopped_early"):
+        ws.append(["Stopped early by user", "Yes"])
+
+    ws.append([])
+    _bold_row("Species", "Count")
+    sc = s.get("species_counts") or {}
+    if sc:
+        for sp in sorted(sc):
+            ws.append([sp, sc[sp]])
+    else:
+        ws.append(["(no species classified)", 0])
+    ws.column_dimensions["A"].width = 28
+    ws.column_dimensions["B"].width = 16
+
+    # --- Sheet 2: File Details (per image/video) ---
+    ws2 = wb.create_sheet("File Details")
+    ws2.append(_headers(fields))
+    for cell in ws2[1]:
+        cell.font = bold
     for r in records:
-        ws.append(_row(r, fields))
-    if summary:
-        ws2 = wb.create_sheet("Summary")
-        ws2.append(["Category", "Count"])
-        ws2.append(["Total files", summary.get("total_files", 0)])
-        ws2.append(["Empty", summary.get("total_empty", 0)])
-        ws2.append(["Human/Vehicle", summary.get("total_human", 0)])
-        ws2.append(["Animal", summary.get("total_animal", 0)])
-        sc = summary.get("species_counts") or {}
-        if sc:
-            ws2.append([])
-            ws2.append(["Species", "Count"])
-            for sp in sorted(sc):
-                ws2.append([sp, sc[sp]])
+        ws2.append(_row(r, fields))
+    if records:
+        ws2.freeze_panes = "A2"
+
     wb.save(path)
 
 
@@ -304,15 +338,38 @@ def write_reports(records, out_dir, fields=None, formats=None, summary=None, log
     for fmt in formats:
         try:
             if fmt == "csv":
-                p = base + ".csv"; write_csv(p, records, fields); written.append(p)
+                written.append(_write_locked_safe(
+                    base + ".csv", lambda p: write_csv(p, records, fields), log))
             elif fmt == "json":
-                p = base + ".json"; write_json(p, records, fields); written.append(p)
+                written.append(_write_locked_safe(
+                    base + ".json", lambda p: write_json(p, records, fields), log))
             elif fmt == "xlsx":
-                p = base + ".xlsx"; write_xlsx(p, records, fields, summary); written.append(p)
+                written.append(_write_locked_safe(
+                    base + ".xlsx", lambda p: write_xlsx(p, records, fields, summary), log))
             elif fmt == "sqlite":
-                p = base + ".db"; write_sqlite(p, records, fields); written.append(p)
+                written.append(_write_locked_safe(
+                    base + ".db", lambda p: write_sqlite(p, records, fields), log))
             elif fmt == "timelapse":
                 written.extend(write_timelapse(out_dir, records))
         except Exception as e:
             log(f"  {fmt} export failed: {e}")
     return written
+
+
+def _write_locked_safe(path, writer, log):
+    """
+    Write via writer(path). If the destination is locked (e.g. the previous
+    detection_report.xlsx is still open in Excel) retry once with a timestamped
+    name so a run's results are never silently lost.
+    """
+    try:
+        writer(path)
+        return path
+    except (PermissionError, OSError) as e:
+        base, ext = os.path.splitext(path)
+        alt = f"{base}_{datetime.now().strftime('%Y%m%d_%H%M%S')}{ext}"
+        log(f"  {os.path.basename(path)} is in use ({e}); "
+            f"saving as {os.path.basename(alt)} instead. "
+            "Close it in Excel to overwrite the main file next time.")
+        writer(alt)
+        return alt

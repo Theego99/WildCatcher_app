@@ -15,6 +15,7 @@ import ctypes
 import json
 import logging
 import shutil
+import subprocess
 
 # Import onnxruntime BEFORE PyQt5: on Windows the Qt DLLs conflict with
 # onnxruntime-directml's DLL initialization unless ORT is loaded first.
@@ -38,10 +39,15 @@ from wc_styles import (
     PROGRESS_BAR_STYLE, LOG_TEXTEDIT_STYLE, GLOBAL_MESSAGEBOX_STYLE,
 )
 from wc_translations import LANGUAGES, LANGUAGE_CODES, get_translation
-from wc_license import LICENSE_FILE, verify_license_file, get_device_fingerprint
+from wc_license import (
+    LICENSE_FILE, verify_license_file, verify_license_key,
+    save_license_key, get_device_fingerprint,
+)
 from wc_models import resource_path
 from wc_processing import ProcessingThread
-from wc_widgets import FolderDropViewer, ModelPipelineWidget
+from wc_widgets import (
+    FolderDropViewer, ModelPipelineWidget, CollapsibleSection, scale_css_fontsize,
+)
 from video_player import VideoPlayer
 import wc_output
 
@@ -54,10 +60,17 @@ sys.path.insert(0, yolov5_path)
 # MAIN WINDOW
 # =========================================================================
 class VideoDetectionApp(QMainWindow):
+    # Base application font — UI zoom scales this live.
+    BASE_FONT_FAMILY = "Segoe UI Variable"
+    BASE_FONT_PT = 10
+    MIN_UI_SCALE = 0.8
+    MAX_UI_SCALE = 2.2
+
     def __init__(self):
         super().__init__()
         self.license_valid = False
         self.license_info = {}
+        self.ui_scale = 1.0
         self.setWindowTitle("Wild Catcher")
 
         screen = QDesktopWidget().availableGeometry()
@@ -322,7 +335,9 @@ class VideoDetectionApp(QMainWindow):
         """A panel of checkboxes letting the client pick output formats + columns."""
         trans = self.trans
         container = QWidget()
-        container.setStyleSheet("font-size:12px;")  # avoid the 22px panel default
+        # color-only (no pinned font-size) so children inherit the zoomable
+        # app font, while still avoiding the 22px settings-panel default.
+        container.setStyleSheet("color:#DDD;")
         lay = QVBoxLayout()
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(3)
@@ -330,27 +345,36 @@ class VideoDetectionApp(QMainWindow):
 
         header = QLabel(trans.get("output_export_header", "Output / Export"))
         header.setStyleSheet("font-size:16px; color:#9bc472; font-weight:bold;")
+        self._output_header_label = header
         lay.addWidget(header)
 
-        # --- Formats ---
-        fmt_label = QLabel(trans.get("output_formats_label", "Output format(s):"))
-        fmt_label.setStyleSheet("color:#9bc472; font-weight:bold;")
-        lay.addWidget(fmt_label)
+        hint = QLabel(trans.get("output_export_hint",
+                                "Click a section below to expand it."))
+        hint.setStyleSheet("color:#888; font-size:10px;")
+        self._output_hint_label = hint
+        lay.addWidget(hint)
+
+        # --- Formats (collapsible; open by default — it's a short list) ---
+        self._output_group_sections = {}
+        fmt_sec = CollapsibleSection(
+            trans.get("output_formats_label", "Output format(s)"), expanded=True)
+        self._output_format_section = fmt_sec
         self._format_checks = {}
         for fmt in wc_output.ALL_FORMATS:
             cb = QCheckBox(wc_output.FORMAT_LABELS.get(fmt, fmt))
             cb.setStyleSheet("color:#DDD;")
             cb.setChecked(fmt in wc_output.DEFAULT_FORMATS)
             self._format_checks[fmt] = cb
-            lay.addWidget(cb)
+            fmt_sec.addWidget(cb)
         note = QLabel(trans.get("timelapse_note",
                                 "Timelapse .ddb/.tdb is experimental — open it in "
                                 "Timelapse to verify."))
         note.setStyleSheet("color:#888; font-size:10px;")
         note.setWordWrap(True)
-        lay.addWidget(note)
+        fmt_sec.addWidget(note)
+        lay.addWidget(fmt_sec)
 
-        # --- Fields, grouped ---
+        # --- Fields: one collapsible per group (all collapsed by default) ---
         fld_label = QLabel(trans.get("output_fields_label", "Columns to include:"))
         fld_label.setStyleSheet("color:#9bc472; font-weight:bold; margin-top:6px;")
         lay.addWidget(fld_label)
@@ -360,15 +384,17 @@ class VideoDetectionApp(QMainWindow):
             items = groups.get(g) or []
             if not items:
                 continue
-            glabel = QLabel(trans.get("group_" + g, wc_output.GROUP_LABELS.get(g, g)))
-            glabel.setStyleSheet("color:#7fae5e; font-size:11px; font-weight:bold; margin-top:4px;")
-            lay.addWidget(glabel)
+            sec = CollapsibleSection(
+                trans.get("group_" + g, wc_output.GROUP_LABELS.get(g, g)),
+                expanded=False)
             for key, header_txt, _i18n in items:
                 cb = QCheckBox(header_txt)
                 cb.setStyleSheet("color:#DDD;")
                 cb.setChecked(key in wc_output.DEFAULT_FIELDS)
                 self._field_checks[key] = cb
-                lay.addWidget(cb)
+                sec.addWidget(cb)
+            self._output_group_sections[g] = sec
+            lay.addWidget(sec)
         return container
 
     def _get_output_config(self):
@@ -417,8 +443,20 @@ class VideoDetectionApp(QMainWindow):
             self._sep2,
             self.pipeline_widget,
         ]
+        # These widgets carry no style of their own; give them a (zoom-scaled)
+        # default so the whole settings panel responds to the text-size control.
+        # Explicit set — idempotent across the repeated _init_settings_panel
+        # calls (language change / license import).
+        default_styled = {
+            self.frame_interval_label, self.frame_interval_spinbox,
+            self.processing_duration_label, self.processing_duration_spinbox,
+            self.save_all_checkbox, self.remove_prefixes_button,
+        }
+        self._settings_default_widgets = []
         for w in widgets:
-            w.setStyleSheet(w.styleSheet() if w.styleSheet() else "font-size:22px; color:#FFF;")
+            if w in default_styled:
+                self._settings_default_widgets.append(w)
+                w.setStyleSheet(f"font-size:{self._sfs(22)}px; color:#FFF;")
             self.settings_content_layout.addWidget(w)
 
         self.settings_content_layout.addStretch()
@@ -475,6 +513,59 @@ class VideoDetectionApp(QMainWindow):
             flag_layout.addWidget(btn)
         self.language_content_layout.addLayout(flag_layout)
 
+        # --- Text size / zoom ---
+        sep = QFrame()
+        sep.setFrameShape(QFrame.HLine)
+        sep.setStyleSheet("color:#333; margin-top:8px;")
+        self.language_content_layout.addWidget(sep)
+
+        zoom_title = QLabel(self.trans.get("text_size_label", "Text size"))
+        zoom_title.setStyleSheet("color:#9bc472; font-weight:bold; font-size:15px; margin-top:6px;")
+        self.language_content_layout.addWidget(zoom_title)
+
+        zoom_hint = QLabel(self.trans.get(
+            "text_size_hint", "Make everything bigger or smaller."))
+        zoom_hint.setStyleSheet("color:#888; font-size:11px;")
+        self.language_content_layout.addWidget(zoom_hint)
+
+        zrow = QHBoxLayout()
+        zrow.setAlignment(Qt.AlignLeft)
+        zrow.setSpacing(8)
+        z_btn_style = (
+            "QPushButton { background:#1E4E1E; color:#9bc472; border:1px solid #3C5C3C;"
+            " border-radius:5px; font-size:18px; font-weight:bold; }"
+            "QPushButton:hover { background:#2E6E2E; }"
+        )
+        minus_btn = QPushButton("A−")
+        minus_btn.setFixedSize(48, 40)
+        minus_btn.setStyleSheet(z_btn_style)
+        minus_btn.clicked.connect(lambda: self._zoom_step(-0.1))
+        zrow.addWidget(minus_btn)
+
+        self._zoom_value_label = QLabel(f"{int(round(self.ui_scale * 100))}%")
+        self._zoom_value_label.setAlignment(Qt.AlignCenter)
+        self._zoom_value_label.setFixedWidth(72)
+        self._zoom_value_label.setStyleSheet("color:#FFF; font-size:16px; font-weight:bold;")
+        zrow.addWidget(self._zoom_value_label)
+
+        plus_btn = QPushButton("A+")
+        plus_btn.setFixedSize(48, 40)
+        plus_btn.setStyleSheet(z_btn_style)
+        plus_btn.clicked.connect(lambda: self._zoom_step(0.1))
+        zrow.addWidget(plus_btn)
+
+        reset_btn = QPushButton(self.trans.get("reset_label", "Reset"))
+        reset_btn.setFixedHeight(40)
+        reset_btn.setStyleSheet(
+            "QPushButton { background:#1E4E1E; color:#9bc472; border:1px solid #3C5C3C;"
+            " border-radius:5px; font-size:13px; font-weight:bold; padding:0 12px; }"
+            "QPushButton:hover { background:#2E6E2E; }"
+        )
+        reset_btn.clicked.connect(lambda: self.set_ui_scale(1.0))
+        zrow.addWidget(reset_btn)
+
+        self.language_content_layout.addLayout(zrow)
+
     # ------------------------------------------------------------------
     # Settings persistence
     # ------------------------------------------------------------------
@@ -484,6 +575,7 @@ class VideoDetectionApp(QMainWindow):
         s.setValue("processing_duration", self.processing_duration_spinbox.value())
         s.setValue("save_all_frames", self.save_all_checkbox.isChecked())
         s.setValue("language_index", self.current_language_index)
+        s.setValue("ui_scale", self.ui_scale)
         # Save pipeline (includes all per-model options)
         s.setValue("pipeline_steps", json.dumps(self.pipeline_widget.get_pipeline_config()))
         # Save output/export customization
@@ -495,6 +587,13 @@ class VideoDetectionApp(QMainWindow):
 
     def load_settings(self):
         s = self.settings
+        # UI zoom (apply before other widgets render so layout settles once)
+        try:
+            self.ui_scale = float(s.value("ui_scale", 1.0))
+        except (TypeError, ValueError):
+            self.ui_scale = 1.0
+        self.ui_scale = min(self.MAX_UI_SCALE, max(self.MIN_UI_SCALE, self.ui_scale))
+        self.apply_ui_scale()
         self.frame_interval_spinbox.setValue(int(s.value("frame_interval", 16)))
         self.processing_duration_spinbox.setValue(int(s.value("processing_duration", 5)))
         self.save_all_checkbox.setChecked(s.value("save_all_frames", "false") == "true")
@@ -583,15 +682,86 @@ class VideoDetectionApp(QMainWindow):
             self.pipeline_widget.update_translations(trans)
 
     # ------------------------------------------------------------------
+    # UI zoom / text size
+    # ------------------------------------------------------------------
+    def _sfs(self, px):
+        """Scaled font size in px for the current zoom."""
+        return max(6, round(px * self.ui_scale))
+
+    def apply_ui_scale(self):
+        """Apply the current zoom factor to the whole application font AND to
+        widgets whose font size is pinned in a stylesheet (which the app font
+        can't override)."""
+        pt = max(6, round(self.BASE_FONT_PT * self.ui_scale))
+        app = QApplication.instance()
+        if app is not None:
+            app.setFont(QFont(self.BASE_FONT_FAMILY, pt))
+        if hasattr(self, "_zoom_value_label") and self._zoom_value_label is not None:
+            self._zoom_value_label.setText(f"{int(round(self.ui_scale * 100))}%")
+        self._apply_scaled_stylesheets()
+
+    def _apply_scaled_stylesheets(self):
+        """Re-apply pinned-px stylesheets scaled to the current zoom. Every
+        widget is styled from its ORIGINAL css so scaling never compounds."""
+        scale = self.ui_scale
+
+        def _set(attr, css):
+            w = getattr(self, attr, None)
+            if w is not None:
+                try:
+                    w.setStyleSheet(css)
+                except RuntimeError:
+                    pass  # C++ widget already deleted
+
+        # Settings-panel widgets that took the default style.
+        for w in getattr(self, "_settings_default_widgets", []):
+            try:
+                w.setStyleSheet(f"font-size:{self._sfs(22)}px; color:#FFF;")
+            except RuntimeError:
+                pass
+
+        # Named headers / labels.
+        _set("_general_header", f"font-size:{self._sfs(16)}px; color:#9bc472; font-weight:bold;")
+        _set("_output_header_label", f"font-size:{self._sfs(16)}px; color:#9bc472; font-weight:bold;")
+        _set("_output_hint_label", f"color:#888; font-size:{self._sfs(10)}px;")
+        _set("input_dir_label", f"font-size:{self._sfs(18)}px; color:#FFFFFF;")
+        _set("_log_header", f"font-size:{self._sfs(13)}px; color:#888; font-weight:bold;")
+
+        # Widgets built from wc_styles constants (scale their font-size only).
+        if hasattr(self, "start_button"):
+            base = STOP_BUTTON_STYLE if self._is_processing else START_BUTTON_STYLE
+            self.start_button.setStyleSheet(scale_css_fontsize(base, scale))
+        if hasattr(self, "browse_button"):
+            self.browse_button.setStyleSheet(scale_css_fontsize(BROWSE_BUTTON_STYLE, scale))
+        if hasattr(self, "log_text_edit"):
+            self.log_text_edit.setStyleSheet(scale_css_fontsize(LOG_TEXTEDIT_STYLE, scale))
+
+        # Collapsible sections + pipeline widget.
+        if getattr(self, "_output_format_section", None) is not None:
+            self._output_format_section.apply_scale(scale)
+        for sec in getattr(self, "_output_group_sections", {}).values():
+            sec.apply_scale(scale)
+        if hasattr(self, "pipeline_widget"):
+            self.pipeline_widget.apply_scale(scale)
+
+    def set_ui_scale(self, scale):
+        self.ui_scale = min(self.MAX_UI_SCALE, max(self.MIN_UI_SCALE, round(scale, 2)))
+        self.apply_ui_scale()
+        self.settings.setValue("ui_scale", self.ui_scale)
+
+    def _zoom_step(self, delta):
+        self.set_ui_scale(self.ui_scale + delta)
+
+    # ------------------------------------------------------------------
     # Panel toggling
     # ------------------------------------------------------------------
     def _show_settings_panel(self):
         """Make the settings panel visible in the horizontal splitter."""
         if not self.settings_panel.isVisible():
             self.settings_panel.show()
-            # Give settings ~400px, rest to main content
+            # Open at ~50% of the window width (was capped at 450px ≈ 20%).
             total = self.h_splitter.width()
-            settings_w = min(450, total // 3)
+            settings_w = max(self.settings_panel.minimumWidth(), total // 2)
             self.h_splitter.setSizes([settings_w, total - settings_w])
 
     def _hide_settings_panel(self):
@@ -675,6 +845,7 @@ class VideoDetectionApp(QMainWindow):
                 return
 
         self._is_processing = True
+        self._last_output_dir = os.path.join(folder, "detection_data")
         self.start_button.setText(self.trans.get("stop_button", "Stop"))
         self.start_button.setStyleSheet(STOP_BUTTON_STYLE)
         self.progress_bar.setValue(0)
@@ -693,6 +864,7 @@ class VideoDetectionApp(QMainWindow):
         self.processing_thread = ProcessingThread(config)
         self.processing_thread.log_signal.connect(self.log)
         self.processing_thread.progress_signal.connect(self.update_progress)
+        self.processing_thread.message_signal.connect(self._on_processing_message)
         self.processing_thread.finished.connect(self.processing_finished)
         self.processing_thread.start()
 
@@ -713,6 +885,47 @@ class VideoDetectionApp(QMainWindow):
         self.progress_bar.setMaximum(total)
         self.progress_bar.setValue(processed)
         self.progress_bar.setFormat(f"{processed}/{total}")
+
+    def _on_processing_message(self, level, text):
+        """Surface a processing outcome/problem in a dialog (runs on GUI thread
+        via Qt's queued cross-thread signal delivery)."""
+        box = QMessageBox(self)
+        box.setStyleSheet(DARK_MSGBOX_STYLE)
+        if level == "error":
+            box.setIcon(QMessageBox.Critical)
+            box.setWindowTitle(self.trans.get("error_title", "Error"))
+        elif level == "warning":
+            box.setIcon(QMessageBox.Warning)
+            box.setWindowTitle(self.trans.get("warning_title", "Warning"))
+        else:
+            box.setIcon(QMessageBox.Information)
+            box.setWindowTitle(self.trans.get("done_title", "Done"))
+        box.setText(text)
+        box.addButton(QMessageBox.Ok)
+        # Offer a shortcut to the results when there's a folder to show.
+        out_dir = getattr(self, "_last_output_dir", None)
+        open_btn = None
+        if out_dir and os.path.isdir(out_dir):
+            open_btn = box.addButton(
+                self.trans.get("open_results_folder", "Open results folder"),
+                QMessageBox.ActionRole)
+        box.exec_()
+        if open_btn is not None and box.clickedButton() is open_btn:
+            self._open_folder(out_dir)
+
+    def _open_folder(self, path):
+        """Open a folder in the OS file browser (Explorer / Finder / xdg)."""
+        if not path or not os.path.isdir(path):
+            return
+        try:
+            if sys.platform == "win32":
+                os.startfile(path)  # noqa: S606
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", path])
+            else:
+                subprocess.Popen(["xdg-open", path])
+        except Exception as e:
+            self.log(f"Could not open folder: {e}")
 
     def processing_finished(self):
         self.log("Processing complete")
@@ -743,53 +956,118 @@ class VideoDetectionApp(QMainWindow):
         dlg = QtWidgets.QDialog(self)
         dlg.setWindowTitle(trans.get("license_required", "License Required"))
         dlg.setModal(True)
-        dlg.setMinimumWidth(400)
+        dlg.setMinimumWidth(460)
         layout = QVBoxLayout()
+
         lbl = QLabel(trans.get("license_required_dialog", "WildCatcher License Required"))
         lbl.setStyleSheet("font-size:18px; font-weight:bold;")
         layout.addWidget(lbl)
-        if error:
-            el = QLabel(error)
-            el.setStyleSheet("color:red;")
-            layout.addWidget(el)
+
+        step1 = QLabel(trans.get(
+            "license_step1",
+            "1. Send this Device ID to your vendor to get a license key:"))
+        step1.setWordWrap(True)
+        layout.addWidget(step1)
 
         fp = get_device_fingerprint()
         fp_row = QHBoxLayout()
-        fp_row.addWidget(QLabel("Device ID:"))
-        fp_edit = QTextEdit()
+        fp_edit = QLineEdit()
         fp_edit.setReadOnly(True)
         fp_edit.setText(fp)
-        fp_edit.setFixedHeight(30)
-        fp_edit.setStyleSheet("background:#3C3C3C; color:#FFF;")
-        fp_row.addWidget(fp_edit)
+        fp_edit.setStyleSheet("background:#3C3C3C; color:#FFF; font-size:15px;"
+                              " padding:6px; font-family:Consolas,monospace;")
+        fp_row.addWidget(fp_edit, 1)
+        copy_btn = QPushButton(trans.get("copy_button", "Copy"))
+        copy_btn.setStyleSheet(IMPORT_BUTTON_STYLE)
+        copy_btn.clicked.connect(lambda: self._copy_device_id(fp, copy_btn))
+        fp_row.addWidget(copy_btn)
         layout.addLayout(fp_row)
 
-        btn = QPushButton(trans.get("import_license", "Import License"))
-        btn.setStyleSheet(IMPORT_BUTTON_STYLE)
-        btn.clicked.connect(lambda: self._import_license(dlg))
-        layout.addWidget(btn)
+        step2 = QLabel(trans.get(
+            "license_step2", "2. Paste the license key you received below:"))
+        step2.setWordWrap(True)
+        step2.setStyleSheet("margin-top:8px;")
+        layout.addWidget(step2)
+
+        key_edit = QTextEdit()
+        key_edit.setPlaceholderText("WC-XXXXXX-XXXXXX-…")
+        key_edit.setFixedHeight(90)
+        key_edit.setStyleSheet("background:#2E2E2E; color:#FFF; font-size:13px;"
+                               " font-family:Consolas,monospace;")
+        layout.addWidget(key_edit)
+
+        err_lbl = QLabel(error or "")
+        err_lbl.setStyleSheet("color:#FF6B6B;")
+        err_lbl.setWordWrap(True)
+        err_lbl.setVisible(bool(error))
+        layout.addWidget(err_lbl)
+
+        activate_btn = QPushButton(trans.get("activate_button", "Activate"))
+        activate_btn.setStyleSheet(IMPORT_BUTTON_STYLE)
+        activate_btn.clicked.connect(
+            lambda: self._activate_license_key(dlg, key_edit.toPlainText(), err_lbl))
+        layout.addWidget(activate_btn)
+
+        file_btn = QPushButton(trans.get("import_from_file", "Import from file (.wcl)…"))
+        file_btn.setStyleSheet(
+            "QPushButton { background:transparent; color:#9bc472; border:none;"
+            " text-decoration:underline; font-size:12px; }")
+        file_btn.clicked.connect(lambda: self._import_license_file(dlg, err_lbl))
+        layout.addWidget(file_btn)
+
         dlg.setLayout(layout)
         return dlg.exec_()
 
-    def _import_license(self, parent_dialog):
+    def _copy_device_id(self, fp, btn):
+        QApplication.clipboard().setText(fp)
+        btn.setText(self.trans.get("copied_button", "Copied!"))
+
+    def _activate_license_key(self, parent_dialog, key_text, err_lbl):
         trans = self.trans
-        f, _ = QFileDialog.getOpenFileName(self, "Select License", "", "License Files (*.wcl);;All Files (*)")
+        key_text = (key_text or "").strip()
+        if not key_text:
+            err_lbl.setText(trans.get("paste_key_prompt", "Please paste a license key first."))
+            err_lbl.setVisible(True)
+            return
+        valid, info = save_license_key(key_text)
+        if valid:
+            self.license_valid = True
+            self.license_info = info
+            QMessageBox.information(
+                self, trans.get("activate_button", "Activate"),
+                trans.get("license_imported_success", "License activated. Thank you!"))
+            self._init_settings_panel()
+            parent_dialog.accept()
+        else:
+            err_lbl.setText(str(info))
+            err_lbl.setVisible(True)
+
+    def _import_license_file(self, parent_dialog, err_lbl):
+        trans = self.trans
+        f, _ = QFileDialog.getOpenFileName(
+            self, trans.get("select_license", "Select License"),
+            "", "License Files (*.wcl);;All Files (*)")
         if not f:
             return
         try:
-            dest = os.path.join(os.path.dirname(sys.argv[0]), LICENSE_FILE)
-            shutil.copy(f, dest)
-            v, i = verify_license_file(dest)
+            v, i = verify_license_file(f)
             if v:
+                dest = os.path.join(os.path.dirname(sys.argv[0]), LICENSE_FILE)
+                if os.path.abspath(f) != os.path.abspath(dest):
+                    shutil.copy(f, dest)
                 self.license_valid = True
                 self.license_info = i
-                QMessageBox.information(self, trans.get("import_license", "Import"), trans.get("license_imported_success", "Success"))
+                QMessageBox.information(
+                    self, trans.get("import_from_file", "Import"),
+                    trans.get("license_imported_success", "License activated. Thank you!"))
                 self._init_settings_panel()
                 parent_dialog.accept()
             else:
-                QMessageBox.critical(self, trans.get("import_failed", "Failed"), trans.get("license_not_valid_after_import", "Invalid"))
+                err_lbl.setText(str(i))
+                err_lbl.setVisible(True)
         except Exception as e:
-            QMessageBox.critical(self, trans.get("import_failed", "Failed"), str(e))
+            err_lbl.setText(str(e))
+            err_lbl.setVisible(True)
 
     # ------------------------------------------------------------------
     # Misc actions

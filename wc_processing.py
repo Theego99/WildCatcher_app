@@ -19,6 +19,9 @@ from datetime import datetime
 import cv2
 from PyQt5.QtCore import QThread, pyqtSignal
 
+# Hide the console window when shelling out to ffprobe on Windows.
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+
 from process_images import process_images
 from load_detector import load_detector
 from wc_onnx import get_onnx_diagnostics
@@ -94,6 +97,7 @@ def _extract_video_time(filepath):
             ["ffprobe", "-v", "quiet", "-print_format", "json",
              "-show_format", filepath],
             capture_output=True, text=True, timeout=10,
+            creationflags=_NO_WINDOW,
         )
         if result.returncode == 0:
             tags = json.loads(result.stdout).get("format", {}).get("tags", {})
@@ -676,6 +680,10 @@ def process_video_file(
 class ProcessingThread(QThread):
     log_signal = pyqtSignal(str)
     progress_signal = pyqtSignal(int, int)
+    # (level, text) where level is "error" | "warning" | "info".
+    # Lets the UI surface fatal problems / empty runs in a dialog instead of
+    # burying them in the log pane (which users never read).
+    message_signal = pyqtSignal(str, str)
     finished = pyqtSignal()
 
     def __init__(self, config):
@@ -683,7 +691,11 @@ class ProcessingThread(QThread):
         self.cfg = config
         self.total_files = 0
         self.processed_count = 0
+        self.error_files = 0
         self._stop_requested = False
+
+    def notify(self, level, text):
+        self.message_signal.emit(level, text)
 
     def request_stop(self):
         self._stop_requested = True
@@ -705,9 +717,27 @@ class ProcessingThread(QThread):
             for line in get_onnx_diagnostics():
                 self.log(line)
 
-            # Always create detection_data folder
+            # Always create detection_data folder. If the input folder is on
+            # read-only media (locked SD card, network share) this is where a
+            # run silently produced nothing — surface it clearly instead.
             output_root = os.path.join(cfg["input_folder"], "detection_data")
-            os.makedirs(output_root, exist_ok=True)
+            try:
+                os.makedirs(output_root, exist_ok=True)
+                # Verify we can actually write here.
+                _probe = os.path.join(output_root, ".wc_write_test")
+                with open(_probe, "w") as _pf:
+                    _pf.write("ok")
+                os.remove(_probe)
+            except Exception as e:
+                self.log(f"Cannot write to output folder: {e}")
+                self.notify(
+                    "error",
+                    f"Cannot write results to:\n{output_root}\n\n{e}\n\n"
+                    "The folder may be read-only (locked SD card, write-protected "
+                    "drive, or a network share without permission). Unlock the "
+                    "media or copy the files to a writable folder, then try again.",
+                )
+                return
             self.log(f"Output → {output_root}")
 
             # Parse pipeline steps
@@ -775,6 +805,12 @@ class ProcessingThread(QThread):
                 self.log("Detector loaded successfully.")
             except Exception as e:
                 self.log(f"Failed to load detector: {e}")
+                self.notify(
+                    "error",
+                    f"Could not load the detection model:\n{e}\n\n"
+                    "Processing cannot start. If this is a fresh install, the "
+                    "model file may be missing or corrupted.",
+                )
                 return
 
             # Pre-load classifiers
@@ -810,6 +846,23 @@ class ProcessingThread(QThread):
             if skipped_exts:
                 skip_summary = ", ".join(f"{ext}:{n}" for ext, n in sorted(skipped_exts.items()))
                 self.log(f"  Skipped extensions: {skip_summary}")
+
+            # No supported files → this is the classic "it looked like it ran but
+            # produced nothing" case. Tell the user exactly what happened.
+            if self.total_files == 0:
+                extra = ""
+                if skipped_exts:
+                    skip_summary = ", ".join(f"{ext} × {n}" for ext, n in sorted(skipped_exts.items()))
+                    extra = ("\n\nThe folder does contain other files that "
+                             f"WildCatcher does not process:\n{skip_summary}")
+                self.notify(
+                    "warning",
+                    "No images or videos to process were found in:\n"
+                    f"{cfg['input_folder']}\n\n"
+                    "Check that you selected the right folder. Supported types "
+                    "include JPG, PNG, TIFF, MP4, AVI, MOV, MKV and more." + extra,
+                )
+                return
 
             # Analytics
             total_empty, total_human, total_animal = 0, 0, 0
@@ -857,54 +910,82 @@ class ProcessingThread(QThread):
                     detail["models_used"] = models_used_str
                     records.append(detail)
 
-            # Process images
+            def _error_record(filepath, file_type, err):
+                """Minimal record so a failed file still shows up in the report."""
+                rec = _base_record(filepath, file_type)
+                rec["detection"] = "error"
+                rec["notes"] = str(err)
+                return {"empty": False, "error": True, "detail": rec}
+
+            # Process images. Each file is isolated: one corrupt/odd file must
+            # NEVER abort the whole batch (this was the "it processed a few then
+            # produced nothing" bug — a single throw skipped the report entirely).
             for fpath in image_files:
                 if self._stop_requested:
                     self.log("Stopped by user.")
                     break
-                fs = process_image_file(
-                    fpath, detector, det_confidence, det_per_class,
-                    _output_dir(fpath), self.log,
-                    classifier_steps=classifier_steps or None,
-                )
+                try:
+                    fs = process_image_file(
+                        fpath, detector, det_confidence, det_per_class,
+                        _output_dir(fpath), self.log,
+                        classifier_steps=classifier_steps or None,
+                    )
+                except Exception as e:
+                    self.error_files += 1
+                    self.log(f"  ⚠ Skipped (error) {os.path.basename(fpath)}: {e}")
+                    fs = _error_record(fpath, "image", e)
                 _accum(fs)
                 self.processed_count += 1
                 self.progress_signal.emit(self.processed_count, self.total_files)
 
-            # Process videos
+            # Process videos (same per-file isolation).
             for fpath in video_files:
                 if self._stop_requested:
                     self.log("Stopped by user.")
                     break
-                fs = process_video_file(
-                    fpath, detector, det_confidence, det_per_class,
-                    _output_dir(fpath), self.log,
-                    every_n_frames=cfg.get("every_n_frames", 16),
-                    max_duration=cfg.get("processing_duration_seconds", 10),
-                    save_all=cfg.get("save_all", False),
-                    classifier_steps=classifier_steps or None,
-                )
+                try:
+                    fs = process_video_file(
+                        fpath, detector, det_confidence, det_per_class,
+                        _output_dir(fpath), self.log,
+                        every_n_frames=cfg.get("every_n_frames", 16),
+                        max_duration=cfg.get("processing_duration_seconds", 10),
+                        save_all=cfg.get("save_all", False),
+                        classifier_steps=classifier_steps or None,
+                    )
+                except Exception as e:
+                    self.error_files += 1
+                    self.log(f"  ⚠ Skipped (error) {os.path.basename(fpath)}: {e}")
+                    fs = _error_record(fpath, "video", e)
                 _accum(fs)
                 self.processed_count += 1
                 self.progress_signal.emit(self.processed_count, self.total_files)
 
             # Summary log
-            self.log(f"--- Results: {total_animal} animals, {total_human} humans/vehicles, {total_empty} empty ---")
+            self.log(f"--- Results: {total_animal} animals, {total_human} humans/vehicles, "
+                     f"{total_empty} empty, {self.error_files} errors ---")
             if species_counts:
                 self.log("Species counts: " + ", ".join(
                     f"{sp}={cnt}" for sp, cnt in sorted(species_counts.items())
                 ))
 
             # Write report(s) in the client-selected format(s) with selected columns.
-            # Defaults reproduce the original detection_report.xlsx (back-compat).
-            if not self._stop_requested:
-                summary = {
-                    "total_files": self.total_files, "total_empty": total_empty,
-                    "total_human": total_human, "total_animal": total_animal,
-                    "species_counts": species_counts,
-                }
-                fields = cfg.get("output_fields") or wc_output.DEFAULT_FIELDS
-                formats = cfg.get("output_formats") or wc_output.DEFAULT_FORMATS
+            # ALWAYS write for whatever was processed — even if the user stopped
+            # early or some files errored — so a run is never silently lost.
+            summary = {
+                "total_files": self.total_files,
+                "total_processed": len(records),
+                "total_empty": total_empty,
+                "total_human": total_human,
+                "total_animal": total_animal,
+                "total_errors": self.error_files,
+                "stopped_early": self._stop_requested,
+                "species_counts": species_counts,
+            }
+            fields = cfg.get("output_fields") or wc_output.DEFAULT_FIELDS
+            formats = cfg.get("output_formats") or wc_output.DEFAULT_FORMATS
+            written = []
+            report_error = None
+            if records:
                 try:
                     written = wc_output.write_reports(
                         records, output_root, fields=fields, formats=formats,
@@ -913,13 +994,39 @@ class ProcessingThread(QThread):
                     for p in written:
                         self.log(f"Report saved → {os.path.basename(p)}")
                     if not written:
-                        self.log("No report written (check selected formats).")
+                        report_error = "No report file could be written (check the selected formats)."
+                        self.log(report_error)
                 except Exception as e:
+                    report_error = str(e)
                     self.log(f"Report write failed: {e}")
 
-            self.log("Stopped by user." if self._stop_requested else "Processing completed.")
+            # Surface the outcome in a dialog so success/failure is never invisible.
+            stopped = self._stop_requested
+            self.log("Stopped by user." if stopped else "Processing completed.")
+            headline = "Processing stopped early." if stopped else "Processing complete."
+            body = (
+                f"{headline}\n\n"
+                f"Files processed: {len(records)} of {self.total_files}\n"
+                f"Animals: {total_animal}   Humans/Vehicles: {total_human}   "
+                f"Empty: {total_empty}"
+            )
+            if self.error_files:
+                body += f"\nFiles skipped due to errors: {self.error_files}"
+            body += f"\n\nResults saved in:\n{output_root}"
+            if report_error:
+                self.notify("error",
+                            body + f"\n\nBUT the report could not be written:\n{report_error}")
+            elif self.error_files:
+                self.notify("warning", body)
+            else:
+                self.notify("info", body)
 
         except Exception as e:
             import traceback
             self.log(f"Error: {e}")
             self.log(traceback.format_exc())
+            self.notify(
+                "error",
+                f"Processing stopped because of an unexpected error:\n{e}\n\n"
+                "See the Logs panel for details.",
+            )

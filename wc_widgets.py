@@ -7,17 +7,91 @@ PipelineStepWidget — context-aware step: detector shows include_human/animal,
 ModelPipelineWidget — model management + sequential pipeline configuration.
 """
 import os
+import re
 
 from PyQt5.QtCore import pyqtSignal, Qt
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QTreeView, QHeaderView, QAbstractItemView, QFileDialog,
     QFrame, QDoubleSpinBox, QCheckBox, QComboBox, QScrollArea,
-    QSizePolicy, QMessageBox, QLineEdit,
+    QSizePolicy, QMessageBox, QLineEdit, QToolButton,
 )
 from PyQt5.QtWidgets import QFileSystemModel
 
 import wc_models as models_mod
+
+
+def scale_css_fontsize(css, scale):
+    """Return `css` with every `font-size:Npx` multiplied by `scale`.
+
+    Enables the UI zoom control to scale widgets whose size is pinned in a
+    stylesheet (which the application font cannot override). Always call it on
+    the ORIGINAL css so scaling never compounds."""
+    def repl(m):
+        return f"font-size:{max(6, round(int(m.group(1)) * scale))}px"
+    return re.sub(r"font-size:\s*(\d+)px", repl, css)
+
+
+# =========================================================================
+# COLLAPSIBLE SECTION
+# =========================================================================
+class CollapsibleSection(QWidget):
+    """A clickable header that expands/collapses a content area.
+
+    Keeps long option lists (e.g. the 29 export columns) compact so the
+    settings panel stays readable. Styled to match the dark-green theme.
+    """
+
+    def __init__(self, title="", expanded=False, parent=None):
+        super().__init__(parent)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        self.toggle = QToolButton()
+        self.toggle.setCheckable(True)
+        self.toggle.setChecked(expanded)
+        self.toggle.setText(title)
+        self.toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.toggle.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
+        self.toggle.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.toggle.setCursor(Qt.PointingHandCursor)
+        self.toggle.setStyleSheet(
+            "QToolButton { border:none; color:#9bc472; font-weight:bold;"
+            " font-size:13px; padding:4px 2px; text-align:left; }"
+            "QToolButton:hover { color:#b5da8f; }"
+        )
+        self.toggle.clicked.connect(self._on_toggle)
+        outer.addWidget(self.toggle)
+
+        self.content = QWidget()
+        self.content_layout = QVBoxLayout(self.content)
+        self.content_layout.setContentsMargins(16, 2, 0, 6)
+        self.content_layout.setSpacing(3)
+        self.content.setVisible(expanded)
+        outer.addWidget(self.content)
+
+    def _on_toggle(self, checked):
+        self.content.setVisible(checked)
+        self.toggle.setArrowType(Qt.DownArrow if checked else Qt.RightArrow)
+
+    def apply_scale(self, scale):
+        fs = max(6, round(13 * scale))
+        self.toggle.setStyleSheet(
+            f"QToolButton {{ border:none; color:#9bc472; font-weight:bold;"
+            f" font-size:{fs}px; padding:4px 2px; text-align:left; }}"
+            f"QToolButton:hover {{ color:#b5da8f; }}"
+        )
+
+    def addWidget(self, w):
+        self.content_layout.addWidget(w)
+
+    def set_title(self, title):
+        self.toggle.setText(title)
+
+    def set_expanded(self, expanded):
+        self.toggle.setChecked(expanded)
+        self._on_toggle(expanded)
 
 
 # =========================================================================
@@ -337,6 +411,14 @@ class PipelineStepWidget(QFrame):
         if self._class_widgets:
             class_names = list(self._class_widgets.keys())
             self._rebuild_class_options_list(class_names)
+
+    def apply_scale(self, scale):
+        """Scale this step's pinned-px labels to the current UI zoom."""
+        self._model_label.setStyleSheet(scale_css_fontsize(_LBL_STYLE, scale))
+        self._conf_label.setStyleSheet(scale_css_fontsize(_LBL_STYLE, scale))
+        self._cls_header.setStyleSheet(scale_css_fontsize(
+            "color:#AAA; font-size:12px; font-weight:bold; border:none;", scale))
+        self.model_combo.setStyleSheet(scale_css_fontsize(_COMBO_STYLE, scale))
 
     def _on_model_changed(self, index):
         """Swap visible options based on the selected model's type."""
@@ -824,6 +906,17 @@ class ModelPipelineWidget(QWidget):
         # Propagate to all pipeline step widgets
         for sw in self._step_widgets:
             sw.update_translations(trans)
+
+    def apply_scale(self, scale):
+        """Scale this widget's section headers + step widgets to the UI zoom."""
+        self._sec1_label.setStyleSheet(scale_css_fontsize(
+            "font-size:16px; color:#9bc472; font-weight:bold;", scale))
+        self._sec2_label.setStyleSheet(scale_css_fontsize(
+            "font-size:16px; color:#6B9FD4; font-weight:bold;", scale))
+        self._model_list_label.setStyleSheet(scale_css_fontsize(
+            "font-size:13px; color:#AAA;", scale))
+        for sw in self._step_widgets:
+            sw.apply_scale(scale)
 
     def ensure_default_pipeline(self):
         """If no steps exist, add default steps from whatever models are available."""
