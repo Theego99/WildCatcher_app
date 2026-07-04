@@ -37,6 +37,7 @@ from wc_styles import (
     START_BUTTON_STYLE, STOP_BUTTON_STYLE, DARK_MSGBOX_STYLE,
     SIDEBAR_BUTTON_STYLE, BROWSE_BUTTON_STYLE, IMPORT_BUTTON_STYLE,
     PROGRESS_BAR_STYLE, LOG_TEXTEDIT_STYLE, GLOBAL_MESSAGEBOX_STYLE,
+    TOOLTIP_STYLE,
 )
 from wc_translations import LANGUAGES, LANGUAGE_CODES, get_translation
 import wc_version
@@ -389,14 +390,10 @@ class VideoDetectionApp(QMainWindow):
 
         self.resume_checkbox = QCheckBox("Skip already-processed files (resume)")
         self.resume_checkbox.setChecked(True)
-        self.resume_checkbox.setToolTip(
-            "Re-running a folder skips files already processed. Lets a large or "
-            "interrupted job resume instead of starting over.")
+        self.resume_checkbox.setToolTip("Re-runs skip files already processed.")
 
         self.nondestructive_checkbox = QCheckBox("Non-destructive (keep original file names)")
-        self.nondestructive_checkbox.setToolTip(
-            "Do not rename or delete original files. Results go to the report and "
-            "detection_data only. Recommended when originals must be preserved.")
+        self.nondestructive_checkbox.setToolTip("Never rename or delete originals.")
 
         # Remove Tags button (uses hardcoded prefixes)
         self.remove_prefixes_button = QPushButton("Remove Tags from All File Names")
@@ -1466,6 +1463,14 @@ class VideoDetectionApp(QMainWindow):
             import requests
             r = requests.get(wc_version.UPDATE_API_URL, timeout=8,
                              headers={"Accept": "application/vnd.github+json"})
+            if r.status_code == 404:
+                # No published GitHub Release yet (repo uses tags only / private).
+                # Nothing newer to offer -> treat as up to date.
+                if manual:
+                    QMessageBox.information(self, title, trans.get(
+                        "up_to_date", "You're on the latest version ({cur}).").format(
+                            cur=wc_version.APP_VERSION))
+                return
             if r.status_code != 200:
                 if manual:
                     QMessageBox.information(self, title, trans.get(
@@ -1654,7 +1659,7 @@ if __name__ == "__main__":
     for role, color in dark_colors.items():
         palette.setColor(role, QColor(color))
     app.setPalette(palette)
-    app.setStyleSheet(GLOBAL_MESSAGEBOX_STYLE)
+    app.setStyleSheet(GLOBAL_MESSAGEBOX_STYLE + TOOLTIP_STYLE)
 
     # Show a splash while the (heavy) window + models initialize.
     splash = _make_splash()

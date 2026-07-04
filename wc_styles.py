@@ -48,6 +48,11 @@ GLOBAL_MESSAGEBOX_STYLE = """
     QMessageBox QPushButton:hover { background-color: #0056b3; }
 """
 
+# Dark, compact tooltips (default Qt tooltips render as a large white box).
+TOOLTIP_STYLE = """
+    QToolTip { color: #FFFFFF; background-color: #1E2E1E; border: 1px solid #3C5C3C; padding: 5px 7px; border-radius: 4px; font-size: 12px; }
+"""
+
 MODEL_CARD_STYLE = """
     QFrame { background-color: #1E2E1E; border: 1px solid #3C5C3C; border-radius: 6px; padding: 8px; }
     QFrame:hover { border-color: #9bc472; }
