@@ -436,6 +436,9 @@ def process_image_file(
     classified_species = []
     classified_confs = []  # (species, confidence) pairs for report
     current_file = image_file
+    # Per-detection raw records (for MegaDetector / ecosystem exports).
+    dets_raw = [{"category": d["category"], "conf": d["conf"], "bbox": d["bbox"],
+                 "species": None, "species_conf": None} for d in detections]
 
     if output_dir is not None:
         base = os.path.splitext(fname)[0]
@@ -458,6 +461,8 @@ def process_image_file(
                 if sp:
                     classified_species.append(sp)
                     classified_confs.append((sp, sp_conf))
+                    dets_raw[i]["species"] = sp
+                    dets_raw[i]["species_conf"] = sp_conf
 
         if crops_saved == 0 and detections:
             log(f"  Warning: {fname} had {len(detections)} detections but 0 crops saved")
@@ -482,7 +487,8 @@ def process_image_file(
         image_file, "image", image_time, det_label, sp_label,
         best_det_conf, sp_acc, stats,
         extra={**exif, "image_width": int(image.shape[1]),
-               "image_height": int(image.shape[0])},
+               "image_height": int(image.shape[0]),
+               "detections_raw": dets_raw},
     )
 
     # Rename the original file with species or category prefix
@@ -691,11 +697,13 @@ def process_video_file(
             dom = Counter(s for s, _ in classified_confs).most_common(1)[0][0]
             sp_label = dom
             sp_acc = max(c for s, c in classified_confs if s == dom)
+        dets_raw = [{"category": d["category"], "conf": d["conf"], "bbox": d["bbox"],
+                     "species": sp_label or None, "species_conf": None} for d in all_dets]
         stats["detail"] = _build_detail(
             video_file, "video", video_time, det_label, sp_label,
             best_det_conf, sp_acc, stats,
             extra={"video_length": video_duration, "video_fps": round(fps, 1),
-                   "frames_processed": len(frames)},
+                   "frames_processed": len(frames), "detections_raw": dets_raw},
         )
 
         # Rename original with species or category prefix

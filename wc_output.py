@@ -99,10 +99,14 @@ DEFAULT_FIELDS = ["id", "file_name", "detection", "species", "time",
                   "video_length", "detection_accuracy", "species_accuracy"]
 DEFAULT_FORMATS = ["xlsx"]
 
-ALL_FORMATS = ["csv", "json", "xlsx", "sqlite", "timelapse"]
+ALL_FORMATS = ["csv", "json", "xlsx", "sqlite",
+               "megadetector", "wildlife_insights", "timelapse"]
 FORMAT_LABELS = {  # i18n key is "format_<name>"
     "csv": "CSV (.csv)", "json": "JSON (.json)", "xlsx": "Excel (.xlsx)",
-    "sqlite": "SQLite database (.db)", "timelapse": "Timelapse (.ddb/.tdb)",
+    "sqlite": "SQLite database (.db)",
+    "megadetector": "MegaDetector JSON (.json)",
+    "wildlife_insights": "Wildlife Insights CSV (.csv)",
+    "timelapse": "Timelapse (.ddb/.tdb)",
 }
 
 REPORT_BASENAME = "detection_report"
@@ -225,6 +229,87 @@ def write_sqlite(path, records, fields):
         con.commit()
     finally:
         con.close()
+
+
+def write_megadetector(path, records, detector_name=None):
+    """
+    MegaDetector-compatible results JSON (format 1.3). WildCatcher's detector
+    already uses MD categories (1 animal / 2 person / 3 vehicle) and normalized
+    [x,y,w,h] bboxes, so this plugs straight into MD-ecosystem tools (Timelapse,
+    EcoAssist, AddaxAI, camtrap workflows).
+    """
+    if detector_name is None:
+        detector_name = (records[0].get("models_used") if records else "") or "WildCatcher"
+
+    # Species -> classification category index.
+    species_list = []
+    for r in records:
+        for d in (r.get("detections_raw") or []):
+            sp = d.get("species")
+            if sp and sp not in species_list:
+                species_list.append(sp)
+    sp_index = {sp: str(i) for i, sp in enumerate(species_list)}
+
+    images = []
+    for r in records:
+        rel = (r.get("relative_path") or "").replace("\\", "/")
+        fname = r.get("file_name", "")
+        file_path = f"{rel}/{fname}" if rel else fname
+        dets, max_conf = [], 0.0
+        for d in (r.get("detections_raw") or []):
+            try:
+                conf = float(d.get("conf") or 0)
+            except (TypeError, ValueError):
+                conf = 0.0
+            bbox = d.get("bbox") or [0, 0, 0, 0]
+            entry = {"category": str(d.get("category", "1")), "conf": round(conf, 4),
+                     "bbox": [round(float(x), 5) for x in bbox]}
+            sp, spc = d.get("species"), d.get("species_conf")
+            if sp and sp in sp_index:
+                try:
+                    entry["classifications"] = [[sp_index[sp], round(float(spc), 4)]] if spc is not None else [[sp_index[sp], 1.0]]
+                except (TypeError, ValueError):
+                    pass
+            dets.append(entry)
+            max_conf = max(max_conf, conf)
+        images.append({"file": file_path, "max_detection_conf": round(max_conf, 4),
+                       "detections": dets})
+
+    data = {
+        "info": {"format_version": "1.3", "detector": detector_name,
+                 "detection_completion_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+        "detection_categories": {"1": "animal", "2": "person", "3": "vehicle"},
+        "classification_categories": {v: k for k, v in sp_index.items()},
+        "images": images,
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=1, ensure_ascii=False, default=str)
+
+
+# Column set aligned to Wildlife Insights / generic camera-trap ingestion.
+_WI_COLUMNS = ["deployment_id", "location", "filename", "timestamp",
+               "common_name", "count", "cv_confidence", "is_blank",
+               "latitude", "longitude"]
+
+
+def write_wildlife_insights(path, records):
+    """
+    Camera-trap CSV in a Wildlife-Insights-style layout (one row per file).
+    A practical starting point for WI / Camtrap-DP ingestion; column mapping may
+    need tweaking to your WI project template.
+    """
+    with open(path, "w", newline="", encoding="utf-8-sig") as f:
+        w = csv.writer(f)
+        w.writerow(_WI_COLUMNS)
+        for r in records:
+            station = r.get("relative_path") or r.get("folder") or ""
+            is_blank = "true" if (r.get("detection", "") in ("", "empty")) else "false"
+            conf = r.get("species_accuracy") or r.get("detection_accuracy") or ""
+            w.writerow([_clean_cell(v) for v in (
+                station, station, r.get("file_name", ""), r.get("time", ""),
+                r.get("species", ""), r.get("animal_count", ""), conf, is_blank,
+                r.get("gps_latitude", ""), r.get("gps_longitude", ""),
+            )])
 
 
 def write_timelapse(out_dir, records):
@@ -363,6 +448,14 @@ def write_reports(records, out_dir, fields=None, formats=None, summary=None, log
             elif fmt == "sqlite":
                 written.append(_write_locked_safe(
                     base + ".db", lambda p: write_sqlite(p, records, fields), log))
+            elif fmt == "megadetector":
+                written.append(_write_locked_safe(
+                    base + "_megadetector.json",
+                    lambda p: write_megadetector(p, records), log))
+            elif fmt == "wildlife_insights":
+                written.append(_write_locked_safe(
+                    base + "_wildlife_insights.csv",
+                    lambda p: write_wildlife_insights(p, records), log))
             elif fmt == "timelapse":
                 written.extend(write_timelapse(out_dir, records))
         except Exception as e:
