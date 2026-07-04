@@ -32,6 +32,7 @@ from wc_onnx import get_onnx_diagnostics
 from wc_sleep_guard import prevent_sleep, allow_sleep
 import wc_models as models_mod
 import wc_output
+import wc_entitlements
 from PIL import Image
 
 resource_path = models_mod.resource_path
@@ -812,6 +813,13 @@ class ProcessingThread(QThread):
                     "empty": {"include": False, "delete_original": False},
                 }
 
+            # --- Entitlement gating (belt-and-suspenders; UI also gates) ---
+            ent = wc_entitlements.from_config(cfg.get("entitlements"))
+            if classifier_steps and not ent.has(wc_entitlements.FEATURE_CLASSIFY):
+                self.log("Species classification is not included in your plan — "
+                         "running detection only.")
+                classifier_steps = []
+
             # Warn if no classifier (Issue #4 fix)
             if not classifier_steps:
                 self.log("⚠ No classifier in pipeline — detections will NOT be classified.")
@@ -890,6 +898,20 @@ class ProcessingThread(QThread):
                     "include JPG, PNG, TIFF, MP4, AVI, MOV, MKV and more." + extra,
                 )
                 return
+
+            # --- Plan volume cap (trial / basic tiers) ---
+            plan_skipped = 0
+            cap = ent.max_images
+            if cap and self.total_files > cap:
+                plan_skipped = self.total_files - cap
+                if len(image_files) >= cap:
+                    image_files = image_files[:cap]
+                    video_files = []
+                else:
+                    video_files = video_files[:cap - len(image_files)]
+                self.total_files = cap
+                self.log(f"Plan limit: processing the first {cap} files "
+                         f"({plan_skipped} skipped). Upgrade to Pro for unlimited.")
 
             # Analytics
             total_empty, total_human, total_animal = 0, 0, 0
@@ -1042,6 +1064,9 @@ class ProcessingThread(QThread):
             )
             if self.error_files:
                 body += f"\nFiles skipped due to errors: {self.error_files}"
+            if plan_skipped:
+                body += (f"\n\nPlan limit reached: {plan_skipped} file(s) were not "
+                         f"processed. Upgrade to Pro for unlimited processing.")
             body += f"\n\nResults saved in:\n{output_root}"
             if report_error:
                 self.notify("error",

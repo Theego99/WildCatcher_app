@@ -72,6 +72,11 @@ def main():
                     help="Expiry date YYYY-MM-DD, or 'never' (default).")
     ap.add_argument("--days", type=int, default=None,
                     help="Days from today until expiry (overrides --expiry).")
+    ap.add_argument("--tier", default="pro", choices=["basic", "pro", "trial"],
+                    help="License tier (default: pro = full access).")
+    ap.add_argument("--max-images", type=int, default=None,
+                    help="Override per-run image cap (0 = unlimited). "
+                         "Defaults to the tier's cap.")
     args = ap.parse_args()
 
     device_id = args.device_id.strip()
@@ -80,7 +85,10 @@ def main():
 
     # Compact on-wire payload (short keys keep the key string small).
     payload = {"l": args.licensee.strip(), "d": device_id,
-               "x": expiry, "i": issued, "v": wc_license._KEY_VERSION}
+               "x": expiry, "i": issued, "v": wc_license._KEY_VERSION,
+               "tr": args.tier}
+    if args.max_images is not None:
+        payload["mx"] = args.max_images
     payload_bytes = json.dumps(payload, sort_keys=True,
                                separators=(",", ":")).encode("utf-8")
 
@@ -103,6 +111,9 @@ def main():
     print("=" * 64)
     print(f"  Licensee : {args.licensee}")
     print(f"  Device   : {device_id}")
+    print(f"  Tier     : {args.tier}")
+    if args.max_images is not None:
+        print(f"  Max/run  : {args.max_images or 'unlimited'}")
     print(f"  Expiry   : {expiry}")
     print(f"  Issued   : {issued}")
     print("-" * 64)

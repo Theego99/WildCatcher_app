@@ -22,7 +22,7 @@ import subprocess
 import onnxruntime  # noqa: F401
 
 from PyQt5 import QtWidgets, QtGui
-from PyQt5.QtCore import QSettings, Qt, QSize
+from PyQt5.QtCore import QSettings, Qt, QSize, QTimer, QThread, pyqtSignal
 from PyQt5.QtGui import QIcon, QFont, QPalette, QColor, QPixmap
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QFileDialog, QLabel, QLineEdit,
@@ -41,6 +41,8 @@ from wc_styles import (
 from wc_translations import LANGUAGES, LANGUAGE_CODES, get_translation
 import wc_version
 import wc_logging
+import wc_entitlements
+from wc_entitlements import FEATURE_CLASSIFY, FEATURE_EXPORT_PREMIUM
 from wc_license import (
     LICENSE_FILE, verify_license_file, verify_license_key,
     save_license_key, get_device_fingerprint,
@@ -91,6 +93,28 @@ If you do not agree to these terms, click Decline and do not use the Software.
 
 
 # =========================================================================
+# BACKGROUND UPDATE CHECK
+# =========================================================================
+class UpdateCheckThread(QThread):
+    """Silently query GitHub for a newer release (off the UI thread)."""
+    update_found = pyqtSignal(str, str)  # (tag, download_url)
+
+    def run(self):
+        try:
+            import requests
+            r = requests.get(wc_version.UPDATE_API_URL, timeout=8,
+                             headers={"Accept": "application/vnd.github+json"})
+            if r.status_code == 200:
+                data = r.json()
+                tag = data.get("tag_name", "")
+                if wc_version.is_newer(tag):
+                    self.update_found.emit(
+                        tag, data.get("html_url") or wc_version.RELEASES_URL)
+        except Exception as e:
+            logging.getLogger("update").info("startup update check failed: %s", e)
+
+
+# =========================================================================
 # MAIN WINDOW
 # =========================================================================
 class VideoDetectionApp(QMainWindow):
@@ -104,6 +128,7 @@ class VideoDetectionApp(QMainWindow):
         super().__init__()
         self.license_valid = False
         self.license_info = {}
+        self.entitlements = None
         self.ui_scale = 1.0
         self.setWindowTitle(f"{wc_version.APP_NAME} {wc_version.APP_VERSION}")
 
@@ -126,6 +151,8 @@ class VideoDetectionApp(QMainWindow):
         self.check_license_and_prompt()
         self.setWindowIcon(QtGui.QIcon(resource_path("assets/app_icon.ico")))
         self.select_input_folder_text = "Select Input Folder"
+        # Silent, once-a-day update check shortly after launch.
+        QTimer.singleShot(2500, self._maybe_check_updates_on_start)
 
     # ------------------------------------------------------------------
     # UI Construction
@@ -513,19 +540,33 @@ class VideoDetectionApp(QMainWindow):
 
     def _add_license_box(self):
         trans = self.trans
+        e = self.entitlements
         box = QVBoxLayout()
-        if self.license_valid and isinstance(self.license_info, dict):
-            licensee = self.license_info.get("licensee", trans.get("not_activated", "Not Activated"))
-            exp = self.license_info.get("expiry", "never")
-        else:
-            licensee = trans.get("not_activated", "Not Activated")
-            exp = "never"
 
-        box.addWidget(QLabel(f"{trans.get('license_label', 'License:')} {licensee}"))
-        exp_str = trans.get("perpetual", "Perpetual") if exp == "never" else f"{trans.get('expires', 'Expires: ')}{exp}"
-        box.addWidget(QLabel(exp_str))
-        import_btn = QPushButton(trans.get("import_license", "Import License"))
-        import_btn.clicked.connect(lambda: self.show_license_dialog(error=None))
+        if self.license_valid and isinstance(self.license_info, dict):
+            licensee = self.license_info.get("licensee") or trans.get("not_activated", "Not Activated")
+            exp = self.license_info.get("expiry", "never")
+            box.addWidget(QLabel(f"{trans.get('license_label', 'License:')} {licensee}"))
+            box.addWidget(QLabel(f"{trans.get('plan_label', 'Plan:')} {e.label if e else '-'}"))
+            exp_str = (trans.get("perpetual", "Perpetual") if exp == "never"
+                       else f"{trans.get('expires', 'Expires: ')}{exp}")
+            box.addWidget(QLabel(exp_str))
+            btn_label = trans.get("manage_license", "Manage license")
+        elif e and e.is_trial and e.active:
+            t = QLabel(f"{trans.get('plan_label', 'Plan:')} {trans.get('trial_label', 'Trial')} "
+                       f"— {e.trial_days_left} {trans.get('days_left', 'days left')}")
+            t.setStyleSheet("color:#FFB86B; font-weight:bold;")
+            box.addWidget(t)
+            box.addWidget(QLabel(trans.get(
+                "trial_upsell", "Upgrade to Pro for unlimited files & all features.")))
+            btn_label = trans.get("upgrade_activate", "Upgrade / Activate")
+        else:
+            box.addWidget(QLabel(trans.get("not_activated", "Not Activated")))
+            btn_label = trans.get("upgrade_activate", "Upgrade / Activate")
+
+        import_btn = QPushButton(btn_label)
+        import_btn.setStyleSheet(IMPORT_BUTTON_STYLE)
+        import_btn.clicked.connect(self._open_license_manager)
         box.addWidget(import_btn)
         container = QWidget()
         container.setLayout(box)
@@ -867,13 +908,32 @@ class VideoDetectionApp(QMainWindow):
             self.start_processing()
 
     def start_processing(self):
-        if not self.license_valid:
-            QMessageBox.critical(self, self.trans["license_required"], self.trans["no_valid_license"])
+        e = self.entitlements
+        # Locked (no license and trial expired) => can't run; steer to purchase.
+        if e is None or not e.active:
+            self._prompt_upgrade(
+                self.trans.get("need_license_to_process",
+                               "Activate a license (or start a trial) to process."))
             return
         folder = self.input_dir_line_edit.text()
         if not folder or not os.path.isdir(folder):
             self.log("Please select a valid folder to process")
             return
+
+        # --- Entitlement gating: species classification (Pro) ---
+        wants_classify = self.pipeline_widget.has_classifier_step()
+        if wants_classify and not e.has(FEATURE_CLASSIFY):
+            box = QMessageBox(self)
+            box.setStyleSheet(DARK_MSGBOX_STYLE)
+            box.setWindowTitle(self.trans.get("upgrade_title", "Upgrade required"))
+            box.setText(self.trans.get(
+                "classify_locked_msg",
+                "Species classification is a Pro feature. This run will detect "
+                "animals but not name the species.\n\nContinue with detection "
+                "only?"))
+            box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+            if box.exec_() == QMessageBox.No:
+                return
 
         # Warn if no classifier step in pipeline
         if not self.pipeline_widget.has_classifier_step():
@@ -898,6 +958,21 @@ class VideoDetectionApp(QMainWindow):
         self.progress_bar.setValue(0)
 
         out_fields, out_formats = self._get_output_config()
+
+        # --- Entitlement gating: premium export formats (Pro) ---
+        out_formats, blocked = e.split_formats(out_formats)
+        if blocked:
+            self.log(f"Premium export formats skipped (Pro feature): {', '.join(blocked)}")
+            QMessageBox.information(
+                self, self.trans.get("upgrade_title", "Upgrade required"),
+                self.trans.get(
+                    "formats_locked_msg",
+                    "These export formats are Pro-only and were skipped:\n{fmts}\n\n"
+                    "CSV, Excel, JSON and SQLite are included in your plan.").format(
+                        fmts=", ".join(blocked)))
+            if not out_formats:
+                out_formats = ["xlsx"]
+
         config = {
             "input_folder": folder,
             "every_n_frames": self.frame_interval_spinbox.value(),
@@ -906,6 +981,7 @@ class VideoDetectionApp(QMainWindow):
             "pipeline_steps": self.pipeline_widget.get_pipeline_config(),
             "output_fields": out_fields,
             "output_formats": out_formats,
+            "entitlements": e.as_config(),
         }
 
         self.progress_detail_label.setVisible(True)
@@ -1017,15 +1093,118 @@ class VideoDetectionApp(QMainWindow):
         valid, info = verify_license_file(LICENSE_FILE)
         self.license_valid = valid
         self.license_info = info if valid else {}
-        if not valid:
-            result = self.show_license_dialog(error=str(info))
-            if result != QtWidgets.QDialog.Accepted:
-                v, i = verify_license_file(LICENSE_FILE)
-                self.license_valid = v
-                self.license_info = i if v else {}
-                if not v:
-                    sys.exit(0)
+        if valid:
+            self.entitlements = wc_entitlements.from_license_info(info)
+        else:
+            self.entitlements = self._handle_no_license()
+        self._apply_entitlements_to_title()
         self._init_settings_panel()
+
+    def _handle_no_license(self):
+        """No license file: run the auto free-trial flow (chosen model)."""
+        start = self.settings.value("trial_start_date", "")
+        if start:
+            days = wc_entitlements.trial_days_left(start)
+            if days > 0:
+                return wc_entitlements.trial_entitlements(days)
+            return self._prompt_trial_expired()      # trial used up
+        return self._welcome_trial_or_activate()      # first ever run
+
+    def _welcome_trial_or_activate(self):
+        trans = self.trans
+        box = QMessageBox(self)
+        box.setStyleSheet(DARK_MSGBOX_STYLE)
+        box.setWindowTitle(trans.get("welcome_title", "Welcome to WildCatcher"))
+        box.setText(trans.get(
+            "welcome_msg",
+            "Start a free {days}-day trial, or activate a license key you "
+            "already have.\n\nThe trial includes species classification and all "
+            "export formats, with up to {cap} files per run.").format(
+                days=wc_entitlements.TRIAL_DAYS,
+                cap=wc_entitlements.TIERS["trial"]["max_images"]))
+        trial_btn = box.addButton(
+            trans.get("start_trial", "Start free trial"), QMessageBox.AcceptRole)
+        lic_btn = box.addButton(
+            trans.get("activate_button", "Activate license"), QMessageBox.ActionRole)
+        box.exec_()
+        if box.clickedButton() is lic_btn:
+            self.show_license_dialog(error=None)
+            v, i = verify_license_file(LICENSE_FILE)
+            if v:
+                self.license_valid = True
+                self.license_info = i
+                return wc_entitlements.from_license_info(i)
+        # Default / trial chosen: begin the trial now.
+        self.settings.setValue("trial_start_date", wc_entitlements.today_iso())
+        return wc_entitlements.trial_entitlements(wc_entitlements.TRIAL_DAYS)
+
+    def _prompt_trial_expired(self):
+        trans = self.trans
+        box = QMessageBox(self)
+        box.setStyleSheet(DARK_MSGBOX_STYLE)
+        box.setWindowTitle(trans.get("trial_ended_title", "Trial ended"))
+        box.setText(trans.get(
+            "trial_ended_msg",
+            "Your free trial has ended. Activate a license to keep using "
+            "WildCatcher."))
+        act = box.addButton(trans.get("activate_button", "Activate license"),
+                            QMessageBox.AcceptRole)
+        box.addButton(trans.get("close_button", "Close"), QMessageBox.RejectRole)
+        box.exec_()
+        if box.clickedButton() is act:
+            self.show_license_dialog(error=None)
+            v, i = verify_license_file(LICENSE_FILE)
+            if v:
+                self.license_valid = True
+                self.license_info = i
+                return wc_entitlements.from_license_info(i)
+        return wc_entitlements.locked_entitlements()
+
+    def _recompute_entitlements(self):
+        """Re-read the license/trial state after an activation attempt."""
+        valid, info = verify_license_file(LICENSE_FILE)
+        self.license_valid = valid
+        self.license_info = info if valid else {}
+        if valid:
+            self.entitlements = wc_entitlements.from_license_info(info)
+        else:
+            start = self.settings.value("trial_start_date", "")
+            days = wc_entitlements.trial_days_left(start) if start else 0
+            self.entitlements = (wc_entitlements.trial_entitlements(days)
+                                 if days > 0 else wc_entitlements.locked_entitlements())
+        self._apply_entitlements_to_title()
+        self._init_settings_panel()
+
+    def _open_license_manager(self):
+        self.show_license_dialog(error=None)
+        QTimer.singleShot(0, self._recompute_entitlements)
+
+    def _prompt_upgrade(self, message):
+        trans = self.trans
+        box = QMessageBox(self)
+        box.setStyleSheet(DARK_MSGBOX_STYLE)
+        box.setWindowTitle(trans.get("upgrade_title", "Upgrade required"))
+        box.setText(message)
+        act = box.addButton(trans.get("activate_button", "Activate license"),
+                            QMessageBox.AcceptRole)
+        box.addButton(trans.get("close_button", "Close"), QMessageBox.RejectRole)
+        box.exec_()
+        if box.clickedButton() is act:
+            self._open_license_manager()
+
+    def _apply_entitlements_to_title(self):
+        base = f"{wc_version.APP_NAME} {wc_version.APP_VERSION}"
+        e = self.entitlements
+        if e and e.is_trial and e.active:
+            base += f"  —  {self.trans.get('trial_label', 'Trial')}: " \
+                    f"{e.trial_days_left} {self.trans.get('days_left', 'days left')}"
+        elif e and not e.active:
+            base += f"  —  {self.trans.get('inactive_label', 'Not activated')}"
+        elif e and not self.license_valid:
+            pass
+        elif e:
+            base += f"  —  {e.label}"
+        self.setWindowTitle(base)
 
     def show_license_dialog(self, error=None):
         trans = self.trans
@@ -1109,6 +1288,8 @@ class VideoDetectionApp(QMainWindow):
         if valid:
             self.license_valid = True
             self.license_info = info
+            self.entitlements = wc_entitlements.from_license_info(info)
+            self._apply_entitlements_to_title()
             QMessageBox.information(
                 self, trans.get("activate_button", "Activate"),
                 trans.get("license_imported_success", "License activated. Thank you!"))
@@ -1133,6 +1314,8 @@ class VideoDetectionApp(QMainWindow):
                     shutil.copy(f, dest)
                 self.license_valid = True
                 self.license_info = i
+                self.entitlements = wc_entitlements.from_license_info(i)
+                self._apply_entitlements_to_title()
                 QMessageBox.information(
                     self, trans.get("import_from_file", "Import"),
                     trans.get("license_imported_success", "License activated. Thank you!"))
@@ -1149,12 +1332,9 @@ class VideoDetectionApp(QMainWindow):
     # Misc actions
     # ------------------------------------------------------------------
     def open_video_player(self):
-        if not self.license_valid:
-            QMessageBox.critical(
-                self,
-                self.trans.get("invalid_license", "Invalid License"),
-                self.trans.get("license_required_for_video", "License required"),
-            )
+        if not (self.entitlements and self.entitlements.active):
+            self._prompt_upgrade(self.trans.get(
+                "license_required_for_video", "License required"))
             return
         try:
             lang_code = LANGUAGE_CODES[self.current_language_index]
@@ -1292,6 +1472,30 @@ class VideoDetectionApp(QMainWindow):
             if manual:
                 QMessageBox.information(self, title, trans.get(
                     "update_check_failed", "Could not check for updates right now."))
+
+    def _maybe_check_updates_on_start(self):
+        """Silent update check at most once per day (non-blocking)."""
+        if self.settings.value("last_update_check", "") == wc_entitlements.today_iso():
+            return
+        self.settings.setValue("last_update_check", wc_entitlements.today_iso())
+        self._update_thread = UpdateCheckThread()
+        self._update_thread.update_found.connect(self._on_update_available)
+        self._update_thread.start()
+
+    def _on_update_available(self, tag, url):
+        trans = self.trans
+        box = QMessageBox(self)
+        box.setStyleSheet(DARK_MSGBOX_STYLE)
+        box.setWindowTitle(trans.get("update_available", "Update available"))
+        box.setText(trans.get(
+            "update_available_msg",
+            "A new version ({new}) is available.\nYou have {cur}.").format(
+                new=tag, cur=wc_version.APP_VERSION))
+        box.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
+        box.button(QMessageBox.Ok).setText(trans.get("download_button", "Download"))
+        if box.exec_() == QMessageBox.Ok:
+            import webbrowser
+            webbrowser.open(url)
 
     def save_diagnostics(self):
         trans = self.trans

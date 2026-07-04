@@ -184,6 +184,10 @@ def _expand_payload(p):
         "device_id": p.get("d", ""),
         "expiry": p.get("x", "never"),
         "issued": p.get("i", ""),
+        # Tiering (optional; absent on already-issued keys -> full access):
+        "tier": p.get("tr"),          # "basic" | "pro" | "trial" | None
+        "features": p.get("ft"),      # explicit feature list, or None
+        "max_images": p.get("mx"),    # explicit per-run cap, or None
     }
 
 
