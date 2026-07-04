@@ -39,6 +39,8 @@ from wc_styles import (
     PROGRESS_BAR_STYLE, LOG_TEXTEDIT_STYLE, GLOBAL_MESSAGEBOX_STYLE,
 )
 from wc_translations import LANGUAGES, LANGUAGE_CODES, get_translation
+import wc_version
+import wc_logging
 from wc_license import (
     LICENSE_FILE, verify_license_file, verify_license_key,
     save_license_key, get_device_fingerprint,
@@ -56,6 +58,38 @@ yolov5_path = os.path.join(os.path.dirname(__file__), "yolov5")
 sys.path.insert(0, yolov5_path)
 
 
+# NOTE: Placeholder agreement — replace with your reviewed legal EULA text.
+EULA_TEXT = """{app} — End User License Agreement
+
+By installing or using {app} ("the Software"), you agree to the following terms.
+
+1. LICENSE. {publisher} grants you a non-exclusive, non-transferable license to
+   use the Software on the licensed device(s) in accordance with your purchased
+   license. The Software is licensed, not sold.
+
+2. RESTRICTIONS. You may not copy (except for backup), redistribute, rent, lease,
+   sublicense, reverse engineer, or attempt to bypass the licensing of the
+   Software, except to the extent permitted by applicable law.
+
+3. DATA. The Software processes your images and videos locally on your device.
+   {publisher} does not collect your media.
+
+4. NO WARRANTY. The Software is provided "AS IS", without warranty of any kind.
+   Automated wildlife detection and classification are probabilistic and may
+   contain errors; review results before relying on them.
+
+5. LIMITATION OF LIABILITY. To the maximum extent permitted by law, {publisher}
+   shall not be liable for any indirect, incidental, or consequential damages
+   arising from the use of the Software.
+
+6. TERMINATION. This license terminates automatically if you breach these terms.
+
+Questions: {support}
+
+If you do not agree to these terms, click Decline and do not use the Software.
+"""
+
+
 # =========================================================================
 # MAIN WINDOW
 # =========================================================================
@@ -71,7 +105,7 @@ class VideoDetectionApp(QMainWindow):
         self.license_valid = False
         self.license_info = {}
         self.ui_scale = 1.0
-        self.setWindowTitle("Wild Catcher")
+        self.setWindowTitle(f"{wc_version.APP_NAME} {wc_version.APP_VERSION}")
 
         screen = QDesktopWidget().availableGeometry()
         self.resize(screen.width() // 2, screen.height() // 2)
@@ -87,6 +121,8 @@ class VideoDetectionApp(QMainWindow):
 
         self._build_ui()
         self.update_language()
+        if not self.maybe_show_eula():
+            sys.exit(0)
         self.check_license_and_prompt()
         self.setWindowIcon(QtGui.QIcon(resource_path("assets/app_icon.ico")))
         self.select_input_folder_text = "Select Input Folder"
@@ -199,6 +235,11 @@ class VideoDetectionApp(QMainWindow):
         )
         self.app_icon_label.setPixmap(pix)
         self.app_icon_label.setAlignment(Qt.AlignCenter)
+        self.app_icon_label.setCursor(Qt.PointingHandCursor)
+        self.app_icon_label.setToolTip(
+            f"{wc_version.APP_NAME} {wc_version.APP_VERSION} — About")
+        # Click the logo to open the About dialog.
+        self.app_icon_label.mousePressEvent = lambda _e: self.show_about()
         opacity = QGraphicsOpacityEffect()
         opacity.setOpacity(0.5)
         self.app_icon_label.setGraphicsEffect(opacity)
@@ -273,6 +314,12 @@ class VideoDetectionApp(QMainWindow):
         self.progress_bar.setStyleSheet(PROGRESS_BAR_STYLE)
         self.progress_bar.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.main_area_layout.addWidget(self.progress_bar)
+
+        # Live throughput / ETA / current file line.
+        self.progress_detail_label = QLabel("")
+        self.progress_detail_label.setStyleSheet("color:#9bc472; font-size:12px;")
+        self.progress_detail_label.setVisible(False)
+        self.main_area_layout.addWidget(self.progress_detail_label)
 
     def _build_folder_viewer(self):
         self.folder_viewer = FolderDropViewer(self)
@@ -861,9 +908,13 @@ class VideoDetectionApp(QMainWindow):
             "output_formats": out_formats,
         }
 
+        self.progress_detail_label.setVisible(True)
+        self.progress_detail_label.setText(self.trans.get("preparing", "Preparing…"))
+
         self.processing_thread = ProcessingThread(config)
         self.processing_thread.log_signal.connect(self.log)
         self.processing_thread.progress_signal.connect(self.update_progress)
+        self.processing_thread.progress_detail_signal.connect(self._on_progress_detail)
         self.processing_thread.message_signal.connect(self._on_processing_message)
         self.processing_thread.finished.connect(self.processing_finished)
         self.processing_thread.start()
@@ -885,6 +936,28 @@ class VideoDetectionApp(QMainWindow):
         self.progress_bar.setMaximum(total)
         self.progress_bar.setValue(processed)
         self.progress_bar.setFormat(f"{processed}/{total}")
+
+    @staticmethod
+    def _fmt_duration(seconds):
+        seconds = int(max(0, seconds))
+        h, rem = divmod(seconds, 3600)
+        m, s = divmod(rem, 60)
+        return f"{h}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+
+    def _on_progress_detail(self, d):
+        trans = self.trans
+        processed, total = d.get("processed", 0), d.get("total", 0)
+        rate = d.get("rate", 0.0)
+        parts = [f"{processed}/{total}"]
+        if rate > 0:
+            parts.append(f"{rate:.1f} {trans.get('items_per_sec', 'files/s')}")
+            if processed < total:
+                parts.append(f"{trans.get('eta_label', 'ETA')} {self._fmt_duration(d.get('eta', 0))}")
+        cur = d.get("current") or ""
+        line = "  •  ".join(parts)
+        if cur:
+            line += f"  —  {cur}"
+        self.progress_detail_label.setText(line)
 
     def _on_processing_message(self, level, text):
         """Surface a processing outcome/problem in a dialog (runs on GUI thread
@@ -933,6 +1006,9 @@ class VideoDetectionApp(QMainWindow):
         self.start_button.setText(self.trans.get("start_button", "Start"))
         self.start_button.setStyleSheet(START_BUTTON_STYLE)
         self.start_button.setEnabled(True)
+        if hasattr(self, "progress_detail_label"):
+            self.progress_detail_label.setText(
+                self.trans.get("processing_complete_short", "Processing complete."))
 
     # ------------------------------------------------------------------
     # License
@@ -1124,6 +1200,161 @@ class VideoDetectionApp(QMainWindow):
                         break  # Only strip one prefix per file
         self.log(f"Removed tags from {count} files.")
 
+    # ------------------------------------------------------------------
+    # About / EULA / Updates / Diagnostics
+    # ------------------------------------------------------------------
+    def show_about(self):
+        trans = self.trans
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle(trans.get("about_title", "About WildCatcher"))
+        dlg.setModal(True)
+        dlg.setMinimumWidth(420)
+        lay = QVBoxLayout()
+
+        logo = QLabel()
+        logo.setPixmap(QPixmap(resource_path("assets/app_icon.ico")).scaled(
+            64, 64, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        logo.setAlignment(Qt.AlignCenter)
+        lay.addWidget(logo)
+
+        title = QLabel(f"{wc_version.APP_NAME}")
+        title.setStyleSheet("font-size:22px; font-weight:bold; color:#9bc472;")
+        title.setAlignment(Qt.AlignCenter)
+        lay.addWidget(title)
+
+        ver = QLabel(f"{trans.get('version_label', 'Version')} {wc_version.APP_VERSION}")
+        ver.setAlignment(Qt.AlignCenter)
+        ver.setStyleSheet("color:#CCC;")
+        lay.addWidget(ver)
+
+        meta = QLabel(
+            f"© {wc_version.APP_PUBLISHER}<br>"
+            f"<a style='color:#9bc472;' href='{wc_version.APP_WEBSITE}'>{wc_version.APP_WEBSITE}</a><br>"
+            f"{trans.get('support_label', 'Support:')} {wc_version.SUPPORT_EMAIL}")
+        meta.setOpenExternalLinks(True)
+        meta.setAlignment(Qt.AlignCenter)
+        meta.setStyleSheet("color:#AAA; font-size:12px;")
+        lay.addWidget(meta)
+
+        row = QHBoxLayout()
+        upd = QPushButton(trans.get("check_updates", "Check for updates"))
+        upd.setStyleSheet(IMPORT_BUTTON_STYLE)
+        upd.clicked.connect(lambda: self.check_for_updates(manual=True))
+        row.addWidget(upd)
+        diag = QPushButton(trans.get("save_diagnostics", "Save diagnostics"))
+        diag.setStyleSheet(BROWSE_BUTTON_STYLE)
+        diag.clicked.connect(self.save_diagnostics)
+        row.addWidget(diag)
+        lay.addLayout(row)
+
+        close = QPushButton(trans.get("close_button", "Close"))
+        close.clicked.connect(dlg.accept)
+        lay.addWidget(close)
+
+        dlg.setLayout(lay)
+        dlg.exec_()
+
+    def check_for_updates(self, manual=False):
+        """Check GitHub releases for a newer version. `manual`=user-initiated."""
+        trans = self.trans
+        title = trans.get("updates_title", "Updates")
+        try:
+            import requests
+            r = requests.get(wc_version.UPDATE_API_URL, timeout=8,
+                             headers={"Accept": "application/vnd.github+json"})
+            if r.status_code != 200:
+                if manual:
+                    QMessageBox.information(self, title, trans.get(
+                        "update_check_failed", "Could not check for updates right now."))
+                return
+            data = r.json()
+            tag = data.get("tag_name", "")
+            if wc_version.is_newer(tag, wc_version.APP_VERSION):
+                box = QMessageBox(self)
+                box.setStyleSheet(DARK_MSGBOX_STYLE)
+                box.setWindowTitle(trans.get("update_available", "Update available"))
+                box.setText(trans.get(
+                    "update_available_msg",
+                    "A new version ({new}) is available.\nYou have {cur}.").format(
+                        new=tag, cur=wc_version.APP_VERSION))
+                box.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
+                dl = box.button(QMessageBox.Ok)
+                dl.setText(trans.get("download_button", "Download"))
+                if box.exec_() == QMessageBox.Ok:
+                    import webbrowser
+                    webbrowser.open(data.get("html_url") or wc_version.RELEASES_URL)
+            elif manual:
+                QMessageBox.information(self, title, trans.get(
+                    "up_to_date", "You're on the latest version ({cur}).").format(
+                        cur=wc_version.APP_VERSION))
+        except Exception as e:
+            logging.getLogger("update").info("update check failed: %s", e)
+            if manual:
+                QMessageBox.information(self, title, trans.get(
+                    "update_check_failed", "Could not check for updates right now."))
+
+    def save_diagnostics(self):
+        trans = self.trans
+        default = os.path.join(
+            os.path.expanduser("~"),
+            f"wildcatcher_diagnostics_{wc_version.APP_VERSION}.zip")
+        path, _ = QFileDialog.getSaveFileName(
+            self, trans.get("save_diagnostics", "Save diagnostics"),
+            default, "Zip Archive (*.zip)")
+        if not path:
+            return
+        try:
+            extra = {
+                "license_valid": self.license_valid,
+                "licensee": self.license_info.get("licensee") if isinstance(self.license_info, dict) else None,
+                "device_id": get_device_fingerprint(),
+                "language": self.language,
+                "ui_scale": self.ui_scale,
+            }
+            wc_logging.save_diagnostics_zip(path, extra=extra)
+            QMessageBox.information(
+                self, trans.get("save_diagnostics", "Save diagnostics"),
+                trans.get("diagnostics_saved", "Diagnostics saved to:\n{path}").format(path=path))
+        except Exception as e:
+            QMessageBox.critical(self, trans.get("error_title", "Error"), str(e))
+
+    def maybe_show_eula(self):
+        """Show the EULA on first run (or after its version changes). Returns
+        True if accepted (or already accepted), False if the user declined."""
+        accepted_ver = self.settings.value("eula_accepted_version", "")
+        if accepted_ver == wc_version.APP_VERSION:
+            return True
+        trans = self.trans
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle(trans.get("eula_title", "License Agreement"))
+        dlg.setModal(True)
+        dlg.setMinimumSize(560, 460)
+        lay = QVBoxLayout()
+        head = QLabel(trans.get("eula_title", "License Agreement"))
+        head.setStyleSheet("font-size:18px; font-weight:bold;")
+        lay.addWidget(head)
+        text = QTextEdit()
+        text.setReadOnly(True)
+        text.setPlainText(EULA_TEXT.format(
+            app=wc_version.APP_NAME, publisher=wc_version.APP_PUBLISHER,
+            support=wc_version.SUPPORT_EMAIL))
+        lay.addWidget(text)
+        btns = QHBoxLayout()
+        decline = QPushButton(trans.get("decline_button", "Decline"))
+        decline.clicked.connect(dlg.reject)
+        accept = QPushButton(trans.get("accept_button", "I Agree"))
+        accept.setStyleSheet(IMPORT_BUTTON_STYLE)
+        accept.clicked.connect(dlg.accept)
+        btns.addWidget(decline)
+        btns.addStretch()
+        btns.addWidget(accept)
+        lay.addLayout(btns)
+        dlg.setLayout(lay)
+        if dlg.exec_() == QtWidgets.QDialog.Accepted:
+            self.settings.setValue("eula_accepted_version", wc_version.APP_VERSION)
+            return True
+        return False
+
     def closeEvent(self, event):
         self.save_settings()
         event.accept()
@@ -1154,7 +1385,32 @@ except Exception as e:
 # =========================================================================
 # Entry point
 # =========================================================================
+def _make_splash():
+    """A lightweight programmatic splash (no asset dependency)."""
+    from PyQt5.QtWidgets import QSplashScreen
+    from PyQt5.QtGui import QPainter
+    pix = QPixmap(460, 260)
+    pix.fill(QColor("#0b1c0a"))
+    p = QPainter(pix)
+    icon = QPixmap(resource_path("assets/app_icon.ico"))
+    if not icon.isNull():
+        icon = icon.scaled(88, 88, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        p.drawPixmap((460 - icon.width()) // 2, 44, icon)
+    p.setPen(QColor("#9bc472"))
+    p.setFont(QFont("Segoe UI Variable", 26, QFont.Bold))
+    p.drawText(pix.rect().adjusted(0, 150, 0, 0), Qt.AlignHCenter | Qt.AlignTop,
+               wc_version.APP_NAME)
+    p.setPen(QColor("#AAAAAA"))
+    p.setFont(QFont("Segoe UI Variable", 11))
+    p.drawText(pix.rect().adjusted(0, 200, 0, -18), Qt.AlignHCenter | Qt.AlignTop,
+               f"v{wc_version.APP_VERSION}   •   loading…")
+    p.end()
+    return QSplashScreen(pix)
+
+
 if __name__ == "__main__":
+    wc_logging.setup_logging()
+
     app = QApplication(sys.argv)
     app.setFont(QFont("Segoe UI Variable", 10))
 
@@ -1172,6 +1428,24 @@ if __name__ == "__main__":
     app.setPalette(palette)
     app.setStyleSheet(GLOBAL_MESSAGEBOX_STYLE)
 
+    # Show a splash while the (heavy) window + models initialize.
+    splash = _make_splash()
+    splash.show()
+    app.processEvents()
+
+    # Surface uncaught crashes in a dialog + write them to the log.
+    def _on_crash(exc_type, exc, tb):
+        try:
+            QMessageBox.critical(
+                None, "WildCatcher — Unexpected Error",
+                f"{exc_type.__name__}: {exc}\n\n"
+                "The error was written to the log. Use About → Save diagnostics "
+                "to send it to support.")
+        except Exception:
+            pass
+    wc_logging.install_excepthook(_on_crash)
+
     window = VideoDetectionApp()
     window.show()
+    splash.finish(window)
     sys.exit(app.exec_())

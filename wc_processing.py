@@ -11,10 +11,14 @@ Processing flow:
 import os
 import csv
 import json
+import time
 import shutil
+import logging
 import subprocess
 import tempfile
 from datetime import datetime
+
+_log = logging.getLogger("wildcatcher.processing")
 
 import cv2
 from PyQt5.QtCore import QThread, pyqtSignal
@@ -682,6 +686,8 @@ def process_video_file(
 class ProcessingThread(QThread):
     log_signal = pyqtSignal(str)
     progress_signal = pyqtSignal(int, int)
+    # Rich progress: {processed,total,elapsed,rate,eta,current,stage}
+    progress_detail_signal = pyqtSignal(dict)
     # (level, text) where level is "error" | "warning" | "info".
     # Lets the UI surface fatal problems / empty runs in a dialog instead of
     # burying them in the log pane (which users never read).
@@ -695,15 +701,34 @@ class ProcessingThread(QThread):
         self.processed_count = 0
         self.error_files = 0
         self._stop_requested = False
+        self._start_time = None
 
     def notify(self, level, text):
         self.message_signal.emit(level, text)
+
+    def _emit_progress(self, current="", stage=""):
+        """Emit both the simple count and a rich detail (rate/ETA/current)."""
+        now = time.time()
+        elapsed = now - (self._start_time or now)
+        rate = (self.processed_count / elapsed) if elapsed > 0 else 0.0
+        remaining = max(0, self.total_files - self.processed_count)
+        eta = (remaining / rate) if rate > 0 else 0.0
+        self.progress_signal.emit(self.processed_count, self.total_files)
+        self.progress_detail_signal.emit({
+            "processed": self.processed_count, "total": self.total_files,
+            "elapsed": elapsed, "rate": rate, "eta": eta,
+            "current": current, "stage": stage,
+        })
 
     def request_stop(self):
         self._stop_requested = True
 
     def log(self, msg):
         self.log_signal.emit(msg)
+        try:
+            _log.info(msg)
+        except Exception:
+            pass
 
     def run(self):
         prevent_sleep()
@@ -912,6 +937,9 @@ class ProcessingThread(QThread):
                     detail["models_used"] = models_used_str
                     records.append(detail)
 
+            self._start_time = time.time()
+            self._emit_progress("", "starting")
+
             def _error_record(filepath, file_type, err):
                 """Minimal record so a failed file still shows up in the report."""
                 rec = _base_record(filepath, file_type)
@@ -938,7 +966,7 @@ class ProcessingThread(QThread):
                     fs = _error_record(fpath, "image", e)
                 _accum(fs)
                 self.processed_count += 1
-                self.progress_signal.emit(self.processed_count, self.total_files)
+                self._emit_progress(os.path.basename(fpath))
 
             # Process videos (same per-file isolation).
             for fpath in video_files:
@@ -960,7 +988,7 @@ class ProcessingThread(QThread):
                     fs = _error_record(fpath, "video", e)
                 _accum(fs)
                 self.processed_count += 1
-                self.progress_signal.emit(self.processed_count, self.total_files)
+                self._emit_progress(os.path.basename(fpath))
 
             # Summary log
             self.log(f"--- Results: {total_animal} animals, {total_human} humans/vehicles, "
