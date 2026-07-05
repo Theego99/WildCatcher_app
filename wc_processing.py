@@ -99,6 +99,57 @@ def _strip_known_prefix(fname, known_prefixes):
     return fname
 
 
+# ---------------------------------------------------------------------------
+# Camera-station + capture-event grouping
+# ---------------------------------------------------------------------------
+import re as _re
+
+# Station code at the start of a filename, e.g. "CAM12_...", "ST-03 ...".
+# Must be followed by a separator/end so random UUIDs don't match.
+_STATION_PATTERN = _re.compile(r"^([A-Za-z]{2,8}[-_ ]?\d{1,6})(?=[-_ .]|$)")
+
+
+def _derive_station(rel_path, file_name, known_prefixes=()):
+    """Auto-detect the camera station: top-level subfolder if the file lives in
+    one, else a station code at the start of the filename, else '(unsorted)'."""
+    rel = (rel_path or "").replace("\\", "/").strip("/")
+    if rel:
+        return rel.split("/")[0]
+    name = _strip_known_prefix(file_name or "", known_prefixes)
+    m = _STATION_PATTERN.match(name)
+    return m.group(1) if m else "(unsorted)"
+
+
+def _parse_capture_time(s):
+    for fmt in ("%Y:%m:%d %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            return datetime.strptime(str(s)[:19], fmt)
+        except (ValueError, TypeError):
+            continue
+    return None
+
+
+def _assign_capture_events(records, gap_seconds=60):
+    """Group each station's files into capture events: consecutive detections
+    within `gap_seconds` share an event_id. Returns the event count."""
+    by_station = {}
+    for r in records:
+        by_station.setdefault(r.get("station", ""), []).append(r)
+
+    eid = 0
+    for _station, recs in by_station.items():
+        timed = [(_parse_capture_time(r.get("time")), r) for r in recs]
+        # Undated files sort last, each its own event.
+        timed.sort(key=lambda tr: (tr[0] is None, tr[0] or datetime.min))
+        last = None
+        for t, r in timed:
+            if t is None or last is None or (t - last).total_seconds() > gap_seconds:
+                eid += 1
+            r["event_id"] = eid
+            last = t
+    return eid
+
+
 def crop_image(image, bbox):
     """Crop an image using a normalized [x, y, w, h] bounding box."""
     h, w = image.shape[:2]
@@ -1048,6 +1099,9 @@ class ProcessingThread(QThread):
                             rel = ""
                         detail["relative_path"] = "" if rel == "." else rel
                         detail["folder"] = detail["relative_path"]
+                    detail["station"] = _derive_station(
+                        detail.get("relative_path", ""),
+                        detail.get("file_name", ""), known_prefixes)
                     detail["models_used"] = models_used_str
                     records.append(detail)
 
@@ -1120,6 +1174,14 @@ class ProcessingThread(QThread):
             if resume:
                 _save_manifest(output_root, self._manifest)
 
+            # Capture-event grouping + per-station tallies (auto-detected).
+            gap = int(cfg.get("event_gap_seconds", 60))
+            total_events = _assign_capture_events(records, gap_seconds=gap)
+            station_counts = {}
+            for r in records:
+                station_counts[r.get("station", "")] = \
+                    station_counts.get(r.get("station", ""), 0) + 1
+
             # Summary log
             self.log(f"--- Results: {total_animal} animals, {total_human} humans/vehicles, "
                      f"{total_empty} empty, {self.error_files} errors ---")
@@ -1127,6 +1189,8 @@ class ProcessingThread(QThread):
                 self.log("Species counts: " + ", ".join(
                     f"{sp}={cnt}" for sp, cnt in sorted(species_counts.items())
                 ))
+            if len(station_counts) > 1 or (station_counts and "" not in station_counts):
+                self.log(f"Stations: {len(station_counts)} | Capture events: {total_events}")
 
             # Write report(s) in the client-selected format(s) with selected columns.
             # ALWAYS write for whatever was processed — even if the user stopped
@@ -1140,6 +1204,8 @@ class ProcessingThread(QThread):
                 "total_errors": self.error_files,
                 "stopped_early": self._stop_requested,
                 "species_counts": species_counts,
+                "station_counts": station_counts,
+                "total_events": total_events,
             }
             fields = cfg.get("output_fields") or wc_output.DEFAULT_FIELDS
             formats = cfg.get("output_formats") or wc_output.DEFAULT_FORMATS

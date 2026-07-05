@@ -65,10 +65,12 @@ FIELDS = [
     ("relative_path",      "Relative Path",       GROUP_FILE,      "field_relative_path"),
     ("full_path",          "Full Path",           GROUP_FILE,      "field_full_path"),
     ("folder",             "Folder",              GROUP_FILE,      "field_folder"),
+    ("station",            "Station",             GROUP_FILE,      "field_station"),
     ("file_type",          "File Type",           GROUP_FILE,      "field_file_type"),
     ("file_size_kb",       "File Size (KB)",      GROUP_FILE,      "field_file_size"),
     ("file_modified",      "File Modified",       GROUP_FILE,      "field_file_modified"),
     ("time",               "Time",                GROUP_TIME,      "field_time"),
+    ("event_id",           "Capture Event",       GROUP_TIME,      "field_event_id"),
     ("detection",          "Detection",           GROUP_DETECTION, "field_detection"),
     ("total_detections",   "Total Detections",    GROUP_DETECTION, "field_total_detections"),
     ("animal_count",       "Animal Count",        GROUP_DETECTION, "field_animal_count"),
@@ -190,6 +192,9 @@ def write_xlsx(path, records, fields, summary=None):
     if s.get("stopped_early"):
         ws.append(["Stopped early by user", "Yes"])
 
+    if s.get("total_events"):
+        ws.append(["Capture events", s.get("total_events")])
+
     ws.append([])
     _bold_row("Species", "Count")
     sc = s.get("species_counts") or {}
@@ -198,6 +203,14 @@ def write_xlsx(path, records, fields, summary=None):
             ws.append([sp, sc[sp]])
     else:
         ws.append(["(no species classified)", 0])
+
+    st = s.get("station_counts") or {}
+    if st and not (len(st) == 1 and "" in st):
+        ws.append([])
+        _bold_row("Station", "Files")
+        for name in sorted(st):
+            ws.append([name or "(unsorted)", st[name]])
+
     ws.column_dimensions["A"].width = 28
     ws.column_dimensions["B"].width = 16
 
@@ -302,7 +315,7 @@ def write_wildlife_insights(path, records):
         w = csv.writer(f)
         w.writerow(_WI_COLUMNS)
         for r in records:
-            station = r.get("relative_path") or r.get("folder") or ""
+            station = r.get("station") or r.get("relative_path") or r.get("folder") or ""
             is_blank = "true" if (r.get("detection", "") in ("", "empty")) else "false"
             conf = r.get("species_accuracy") or r.get("detection_accuracy") or ""
             w.writerow([_clean_cell(v) for v in (
