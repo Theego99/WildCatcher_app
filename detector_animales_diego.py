@@ -541,13 +541,18 @@ class VideoDetectionApp(QMainWindow):
         for w in widgets:
             if w in default_styled:
                 self._settings_default_widgets.append(w)
-                w.setStyleSheet(f"font-size:{self._sfs(22)}px; color:#FFF;")
+                # Unscaled base — the global rescale walk scales it from here.
+                w.setProperty("_wc_orig_ss", "font-size:22px; color:#FFF;")
+                w.setStyleSheet("font-size:22px; color:#FFF;")
             self.settings_content_layout.addWidget(w)
 
         self.settings_content_layout.addStretch()
 
         # License info
         self._add_license_box()
+
+        # Scale the (re)built panel to the current zoom.
+        self._rescale_all_fonts()
 
     def _add_license_box(self):
         trans = self.trans
@@ -664,6 +669,9 @@ class VideoDetectionApp(QMainWindow):
         zrow.addWidget(reset_btn)
 
         self.language_content_layout.addLayout(zrow)
+
+        # Scale the (re)built language panel (incl. the 文字サイズ label) to zoom.
+        self._rescale_all_fonts()
 
     # ------------------------------------------------------------------
     # Settings persistence
@@ -797,59 +805,43 @@ class VideoDetectionApp(QMainWindow):
 
     def apply_ui_scale(self):
         """Apply the current zoom factor to the whole application font AND to
-        widgets whose font size is pinned in a stylesheet (which the app font
-        can't override)."""
+        EVERY widget whose font size is pinned in a stylesheet (the app font
+        can't override those)."""
         pt = max(6, round(self.BASE_FONT_PT * self.ui_scale))
         app = QApplication.instance()
         if app is not None:
             app.setFont(QFont(self.BASE_FONT_FAMILY, pt))
         if hasattr(self, "_zoom_value_label") and self._zoom_value_label is not None:
             self._zoom_value_label.setText(f"{int(round(self.ui_scale * 100))}%")
-        self._apply_scaled_stylesheets()
+        self._rescale_all_fonts()
 
-    def _apply_scaled_stylesheets(self):
-        """Re-apply pinned-px stylesheets scaled to the current zoom. Every
-        widget is styled from its ORIGINAL css so scaling never compounds."""
+    def _rescale_all_fonts(self, root=None):
+        """Truly global zoom: walk the whole widget tree and scale every pinned
+        `font-size:Npx` from that widget's cached ORIGINAL stylesheet (so it
+        never compounds). Covers headers, dialogs, the 文字サイズ label, pipeline
+        internals, tree views — everything, not a hand-picked subset."""
         scale = self.ui_scale
-
-        def _set(attr, css):
-            w = getattr(self, attr, None)
-            if w is not None:
-                try:
-                    w.setStyleSheet(css)
-                except RuntimeError:
-                    pass  # C++ widget already deleted
-
-        # Settings-panel widgets that took the default style.
-        for w in getattr(self, "_settings_default_widgets", []):
+        base = root if root is not None else self
+        widgets = base.findChildren(QWidget)
+        widgets.append(base)
+        for w in widgets:
             try:
-                w.setStyleSheet(f"font-size:{self._sfs(22)}px; color:#FFF;")
+                orig = w.property("_wc_orig_ss")
+                if orig is None:
+                    cur = w.styleSheet()
+                    if "font-size" not in cur:
+                        continue  # inherits the (scalable) app font
+                    w.setProperty("_wc_orig_ss", cur)
+                    orig = cur
+                w.setStyleSheet(scale_css_fontsize(orig, scale))
             except RuntimeError:
-                pass
+                continue  # C++ widget already deleted
 
-        # Named headers / labels.
-        _set("_general_header", f"font-size:{self._sfs(16)}px; color:#9bc472; font-weight:bold;")
-        _set("_output_header_label", f"font-size:{self._sfs(16)}px; color:#9bc472; font-weight:bold;")
-        _set("_output_hint_label", f"color:#888; font-size:{self._sfs(10)}px;")
-        _set("input_dir_label", f"font-size:{self._sfs(18)}px; color:#FFFFFF;")
-        _set("_log_header", f"font-size:{self._sfs(13)}px; color:#888; font-weight:bold;")
-
-        # Widgets built from wc_styles constants (scale their font-size only).
-        if hasattr(self, "start_button"):
-            base = STOP_BUTTON_STYLE if self._is_processing else START_BUTTON_STYLE
-            self.start_button.setStyleSheet(scale_css_fontsize(base, scale))
-        if hasattr(self, "browse_button"):
-            self.browse_button.setStyleSheet(scale_css_fontsize(BROWSE_BUTTON_STYLE, scale))
-        if hasattr(self, "log_text_edit"):
-            self.log_text_edit.setStyleSheet(scale_css_fontsize(LOG_TEXTEDIT_STYLE, scale))
-
-        # Collapsible sections + pipeline widget.
-        if getattr(self, "_output_format_section", None) is not None:
-            self._output_format_section.apply_scale(scale)
-        for sec in getattr(self, "_output_group_sections", {}).values():
-            sec.apply_scale(scale)
-        if hasattr(self, "pipeline_widget"):
-            self.pipeline_widget.apply_scale(scale)
+    def _apply_style(self, w, css):
+        """Set a widget's stylesheet AND refresh its cached original, so widgets
+        that change style at runtime (e.g. Start/Stop) still zoom correctly."""
+        w.setProperty("_wc_orig_ss", css)
+        w.setStyleSheet(scale_css_fontsize(css, self.ui_scale))
 
     def set_ui_scale(self, scale):
         self.ui_scale = min(self.MAX_UI_SCALE, max(self.MIN_UI_SCALE, round(scale, 2)))
@@ -973,7 +965,7 @@ class VideoDetectionApp(QMainWindow):
         self._is_processing = True
         self._last_output_dir = os.path.join(folder, "detection_data")
         self.start_button.setText(self.trans.get("stop_button", "Stop"))
-        self.start_button.setStyleSheet(STOP_BUTTON_STYLE)
+        self._apply_style(self.start_button, STOP_BUTTON_STYLE)
         self.progress_bar.setValue(0)
 
         out_fields, out_formats = self._get_output_config()
@@ -1101,7 +1093,7 @@ class VideoDetectionApp(QMainWindow):
         self.log("Processing complete")
         self._is_processing = False
         self.start_button.setText(self.trans.get("start_button", "Start"))
-        self.start_button.setStyleSheet(START_BUTTON_STYLE)
+        self._apply_style(self.start_button, START_BUTTON_STYLE)
         self.start_button.setEnabled(True)
         if hasattr(self, "progress_detail_label"):
             self.progress_detail_label.setText(
@@ -1292,6 +1284,7 @@ class VideoDetectionApp(QMainWindow):
         layout.addWidget(file_btn)
 
         dlg.setLayout(layout)
+        self._rescale_all_fonts(root=dlg)
         return dlg.exec_()
 
     def _copy_device_id(self, fp, btn):
@@ -1453,6 +1446,7 @@ class VideoDetectionApp(QMainWindow):
         lay.addWidget(close)
 
         dlg.setLayout(lay)
+        self._rescale_all_fonts(root=dlg)
         dlg.exec_()
 
     def check_for_updates(self, manual=False):
@@ -1583,6 +1577,7 @@ class VideoDetectionApp(QMainWindow):
         btns.addWidget(accept)
         lay.addLayout(btns)
         dlg.setLayout(lay)
+        self._rescale_all_fonts(root=dlg)
         if dlg.exec_() == QtWidgets.QDialog.Accepted:
             self.settings.setValue("eula_accepted_version", wc_version.APP_VERSION)
             return True
