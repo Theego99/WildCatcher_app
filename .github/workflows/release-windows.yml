@@ -50,6 +50,25 @@ jobs:
       - name: Build with PyInstaller
         run: pyinstaller wildcatcher.spec
 
+      # Code signing — only runs once you add the Azure Trusted Signing secrets
+      # (repo Settings -> Secrets -> Actions). Until then it is skipped and the
+      # build ships unsigned. See SIGNING.md.
+      - name: Sign with Azure Trusted Signing (if configured)
+        if: ${{ secrets.AZURE_TENANT_ID != '' }}
+        uses: azure/trusted-signing-action@v0.5.1
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ secrets.AZURE_TS_ENDPOINT }}
+          trusted-signing-account-name: ${{ secrets.AZURE_TS_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.AZURE_TS_PROFILE }}
+          files-folder: ${{ github.workspace }}\dist\WildCatcher
+          files-folder-filter: exe,dll
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
       - name: Smoke test - verify exe starts
         run: |
           $proc = Start-Process -FilePath "dist\WildCatcher\WildCatcher.exe" -PassThru
