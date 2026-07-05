@@ -59,9 +59,13 @@ hidden_imports = [
     'PIL', 'PIL.Image', 'PIL.ExifTags', 'PIL.ImageOps', 'PIL.ImageDraw',
 
     # --- Crypto (pycryptodome) for license verification ---
-    'Crypto', 'Crypto.PublicKey', 'Crypto.PublicKey.RSA',
-    'Crypto.Signature', 'Crypto.Signature.pkcs1_15',
+    # v2.1 licensing uses ECC (P-256) + DSS keys; keep RSA for old-file compat.
+    'Crypto', 'Crypto.PublicKey', 'Crypto.PublicKey.RSA', 'Crypto.PublicKey.ECC',
+    'Crypto.Signature', 'Crypto.Signature.pkcs1_15', 'Crypto.Signature.DSS',
     'Crypto.Hash', 'Crypto.Hash.SHA256',
+
+    # --- App metadata / logging / entitlements (v2.1) ---
+    'wc_version', 'wc_logging', 'wc_entitlements',
 
     # --- VLC Python bindings ---
     'vlc',
@@ -151,6 +155,6 @@ if sys.platform == 'darwin':
         bundle_identifier='com.wildcatcher.app',
         info_plist={
             'NSHighResolutionCapable': True,
-            'CFBundleShortVersionString': '2.0',
+            'CFBundleShortVersionString': '2.1.0',
         },
     )
