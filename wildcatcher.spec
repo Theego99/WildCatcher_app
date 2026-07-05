@@ -36,6 +36,15 @@ _candidate_data = [
 ]
 datas += [(src, dst) for src, dst in _candidate_data if os.path.exists(src)]
 
+# fpdf2 ships a small data dir (sRGB ICC profile). Not needed for the current
+# report, but collect it defensively so PDF export never breaks if fpdf grows a
+# hard dependency on it.
+try:
+    from PyInstaller.utils.hooks import collect_data_files
+    datas += collect_data_files('fpdf')
+except Exception:
+    pass
+
 # ---------------------------------------------------------------------------
 # Hidden imports PyInstaller can't auto-detect
 # ---------------------------------------------------------------------------
