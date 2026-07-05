@@ -5,6 +5,15 @@ LANGUAGE_CODES = ["jp", "es", "cn", "en", "kr"]
 
 TRANSLATIONS = {
     "Japanese": {
+        # --- Added 2026-07 (v2.1c): onboarding + tooltips ---
+        "ob1_title": "WildCatcher へようこそ",
+        "ob1_body": "WildCatcher は、カメラトラップの写真や動画から野生動物を自動的に検出・識別し、レポートを作成します。",
+        "ob2_title": "使い方",
+        "ob2_body": "1. 写真・動画のフォルダーをドラッグ＆ドロップ、または「参照」をクリック。\n2. 「処理開始」をクリック。\n3. 種のタグが付いたファイルとレポートが「detection_data」フォルダーに作成されます。\n\n左上の設定ボタンでモデル・出力形式・オプションを、言語ボタンで言語と文字サイズを変更できます。",
+        "ob3_title": "ヒント",
+        "ob3_body": "・14日間の無料トライアル中です。ロゴをクリックすればいつでもライセンスキーを入力できます。\n・処理後は「結果を確認」で種のラベルを確認・修正できます。\n・レポートは Excel、CSV、PDF、MegaDetector JSON などに出力できます。",
+        "skip_button": "スキップ", "back_button": "戻る", "next_button": "次へ", "finish_button": "完了",
+        "settings_tooltip": "設定", "language_tooltip": "言語と文字サイズ", "player_tooltip": "動画プレイヤー",
         # --- Added 2026-07 (v2.1b): review gallery ---
         "review_title": "結果を確認", "review_results": "結果を確認",
         "filter_species": "種:", "min_conf": "最小確信度:", "all": "すべて",
@@ -158,6 +167,15 @@ TRANSLATIONS = {
         "general_settings": "一般設定",
     },
     "Spanish": {
+        # --- Added 2026-07 (v2.1c): onboarding + tooltips ---
+        "ob1_title": "Bienvenido a WildCatcher",
+        "ob1_body": "WildCatcher encuentra e identifica automáticamente la fauna en tus fotos y videos de cámara trampa, y genera un informe.",
+        "ob2_title": "Cómo funciona",
+        "ob2_body": "1. Arrastra una carpeta de fotos/videos, o haz clic en Examinar.\n2. Haz clic en Iniciar procesamiento.\n3. Obtén archivos etiquetados por especie y un informe en la carpeta 'detection_data'.\n\nUsa el botón de Ajustes (arriba a la izquierda) para modelos, formatos de salida y opciones; el botón de Idioma para idioma y tamaño de texto.",
+        "ob3_title": "Consejos",
+        "ob3_body": "- Tienes una prueba gratuita de 14 días; introduce una clave de licencia en cualquier momento haciendo clic en el logo.\n- Tras procesar, haz clic en 'Revisar resultados' para comprobar y corregir las etiquetas.\n- Los informes se exportan a Excel, CSV, PDF, MegaDetector JSON y más.",
+        "skip_button": "Omitir", "back_button": "Atrás", "next_button": "Siguiente", "finish_button": "Finalizar",
+        "settings_tooltip": "Ajustes", "language_tooltip": "Idioma y tamaño de texto", "player_tooltip": "Reproductor de video",
         # --- Added 2026-07 (v2.1b): review gallery ---
         "review_title": "Revisar resultados", "review_results": "Revisar resultados",
         "filter_species": "Especie:", "min_conf": "Conf. mín:", "all": "Todas",
@@ -310,6 +328,15 @@ TRANSLATIONS = {
         "general_settings": "Configuración General",
     },
     "Chinese": {
+        # --- Added 2026-07 (v2.1c): onboarding + tooltips ---
+        "ob1_title": "欢迎使用 WildCatcher",
+        "ob1_body": "WildCatcher 会自动在您的相机陷阱照片和视频中查找并识别野生动物，然后生成报告。",
+        "ob2_title": "使用方法",
+        "ob2_body": "1. 拖入照片/视频文件夹，或点击“浏览”。\n2. 点击“开始处理”。\n3. 在“detection_data”文件夹中获得带物种标签的文件和报告。\n\n使用左上角的设置按钮选择模型、输出格式和选项；使用语言按钮更改语言和文字大小。",
+        "ob3_title": "提示",
+        "ob3_body": "- 您正在14天免费试用中；点击徽标可随时输入许可证密钥。\n- 处理后，点击“查看结果”可检查并更正物种标签。\n- 报告可导出为 Excel、CSV、PDF、MegaDetector JSON 等。",
+        "skip_button": "跳过", "back_button": "上一步", "next_button": "下一步", "finish_button": "完成",
+        "settings_tooltip": "设置", "language_tooltip": "语言和文字大小", "player_tooltip": "视频播放器",
         # --- Added 2026-07 (v2.1b): review gallery ---
         "review_title": "查看结果", "review_results": "查看结果",
         "filter_species": "物种:", "min_conf": "最低置信度:", "all": "全部",
@@ -462,6 +489,15 @@ TRANSLATIONS = {
         "general_settings": "常规设置",
     },
     "English": {
+        # --- Added 2026-07 (v2.1c): onboarding + tooltips ---
+        "ob1_title": "Welcome to WildCatcher",
+        "ob1_body": "WildCatcher automatically finds and identifies wildlife in your camera-trap photos and videos, then builds a report.",
+        "ob2_title": "How it works",
+        "ob2_body": "1. Drop a folder of photos/videos, or click Browse.\n2. Click Start Processing.\n3. Get species-tagged files and a report in the 'detection_data' folder.\n\nUse the Settings button (top-left) for models, output formats and options; the Language button for language and text size.",
+        "ob3_title": "Tips",
+        "ob3_body": "- You're on a free 14-day trial; enter a license key anytime by clicking the logo.\n- After processing, click 'Review Results' to check and fix species labels.\n- Reports export to Excel, CSV, PDF, MegaDetector JSON and more.",
+        "skip_button": "Skip", "back_button": "Back", "next_button": "Next", "finish_button": "Finish",
+        "settings_tooltip": "Settings", "language_tooltip": "Language & text size", "player_tooltip": "Video player",
         # --- Added 2026-07 (v2.1b): review gallery ---
         "review_title": "Review Results", "review_results": "Review Results",
         "filter_species": "Species:", "min_conf": "Min conf:", "all": "All",
@@ -614,6 +650,15 @@ TRANSLATIONS = {
         "general_settings": "General Settings",
     },
     "Korean": {
+        # --- Added 2026-07 (v2.1c): onboarding + tooltips ---
+        "ob1_title": "WildCatcher에 오신 것을 환영합니다",
+        "ob1_body": "WildCatcher는 카메라 트랩 사진과 동영상에서 야생동물을 자동으로 찾아 식별하고 보고서를 작성합니다.",
+        "ob2_title": "사용 방법",
+        "ob2_body": "1. 사진/동영상 폴더를 끌어다 놓거나 찾아보기를 클릭하세요.\n2. 처리 시작을 클릭하세요.\n3. 'detection_data' 폴더에 종이 태그된 파일과 보고서가 생성됩니다.\n\n왼쪽 위 설정 버튼으로 모델·출력 형식·옵션을, 언어 버튼으로 언어와 글자 크기를 변경하세요.",
+        "ob3_title": "팁",
+        "ob3_body": "- 14일 무료 체험 중입니다. 로고를 클릭하면 언제든 라이선스 키를 입력할 수 있습니다.\n- 처리 후 '결과 검토'를 클릭해 종 라벨을 확인하고 수정하세요.\n- 보고서는 Excel, CSV, PDF, MegaDetector JSON 등으로 내보낼 수 있습니다.",
+        "skip_button": "건너뛰기", "back_button": "뒤로", "next_button": "다음", "finish_button": "완료",
+        "settings_tooltip": "설정", "language_tooltip": "언어 및 글자 크기", "player_tooltip": "동영상 플레이어",
         # --- Added 2026-07 (v2.1b): review gallery ---
         "review_title": "결과 검토", "review_results": "결과 검토",
         "filter_species": "종:", "min_conf": "최소 신뢰도:", "all": "전체",

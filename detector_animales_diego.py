@@ -29,7 +29,7 @@ from PyQt5.QtWidgets import (
     QPushButton, QVBoxLayout, QHBoxLayout, QProgressBar, QWidget,
     QTextEdit, QCheckBox, QSpinBox, QMessageBox,
     QSizePolicy, QDesktopWidget, QScrollArea, QFrame,
-    QGraphicsOpacityEffect, QSplitter,
+    QGraphicsOpacityEffect, QSplitter, QStackedWidget,
 )
 
 # WildCatcher modules
@@ -151,6 +151,8 @@ class VideoDetectionApp(QMainWindow):
         if not self.maybe_show_eula():
             sys.exit(0)
         self.check_license_and_prompt()
+        if self.entitlements and self.entitlements.active:
+            self.maybe_show_onboarding()
         self.setWindowIcon(QtGui.QIcon(resource_path("assets/app_icon.ico")))
         self.select_input_folder_text = "Select Input Folder"
         # Silent, once-a-day update check shortly after launch.
@@ -802,6 +804,10 @@ class VideoDetectionApp(QMainWindow):
 
         if hasattr(self, "review_button"):
             self.review_button.setText(trans.get("review_results", "Review Results"))
+        if hasattr(self, "settings_button"):
+            self.settings_button.setToolTip(trans.get("settings_tooltip", "Settings"))
+            self.language_button.setToolTip(trans.get("language_tooltip", "Language & text size"))
+            self.player_button.setToolTip(trans.get("player_tooltip", "Video player"))
         if hasattr(self, "folder_viewer"):
             self.folder_viewer.set_hint_text(trans.get("drop_hint", "Drag & drop a folder here"))
         if hasattr(self, "_general_header"):
@@ -1623,6 +1629,97 @@ class VideoDetectionApp(QMainWindow):
             self.settings.setValue("eula_accepted_version", wc_version.APP_VERSION)
             return True
         return False
+
+    def maybe_show_onboarding(self):
+        """Short first-run wizard orienting new users (once per version)."""
+        if self.settings.value("onboarding_done_version", "") == wc_version.APP_VERSION:
+            return
+        trans = self.trans
+        pages = [
+            (trans.get("ob1_title", "Welcome to WildCatcher"),
+             trans.get("ob1_body",
+                       "WildCatcher automatically finds and identifies wildlife "
+                       "in your camera-trap photos and videos, then builds a report.")),
+            (trans.get("ob2_title", "How it works"),
+             trans.get("ob2_body",
+                       "1. Drop a folder of photos/videos, or click Browse.\n"
+                       "2. Click Start Processing.\n"
+                       "3. Get species-tagged files and a report in the "
+                       "'detection_data' folder.\n\n"
+                       "Use the Settings button (top-left) for models, output "
+                       "formats and options; the Language button for language and "
+                       "text size.")),
+            (trans.get("ob3_title", "Tips"),
+             trans.get("ob3_body",
+                       "- You're on a free 14-day trial; enter a license key "
+                       "anytime by clicking the logo.\n"
+                       "- After processing, click 'Review Results' to check and "
+                       "fix species labels.\n"
+                       "- Reports export to Excel, CSV, PDF, MegaDetector JSON "
+                       "and more.")),
+        ]
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle(trans.get("welcome_title", "Welcome to WildCatcher"))
+        dlg.setModal(True)
+        dlg.setMinimumSize(540, 380)
+        lay = QVBoxLayout(dlg)
+        stack = QStackedWidget()
+        for title, body in pages:
+            page = QWidget()
+            pl = QVBoxLayout(page)
+            t = QLabel(title)
+            t.setStyleSheet("font-size:20px; font-weight:bold; color:#9bc472;")
+            pl.addWidget(t)
+            b = QLabel(body)
+            b.setWordWrap(True)
+            b.setStyleSheet("font-size:13px; color:#DDD;")
+            pl.addWidget(b)
+            pl.addStretch()
+            stack.addWidget(page)
+        lay.addWidget(stack, 1)
+
+        nav = QHBoxLayout()
+        skip = QPushButton(trans.get("skip_button", "Skip"))
+        step_lbl = QLabel()
+        step_lbl.setStyleSheet("color:#888;")
+        back = QPushButton(trans.get("back_button", "Back"))
+        nxt = QPushButton(trans.get("next_button", "Next"))
+        nxt.setStyleSheet(IMPORT_BUTTON_STYLE)
+        nav.addWidget(skip)
+        nav.addWidget(step_lbl)
+        nav.addStretch()
+        nav.addWidget(back)
+        nav.addWidget(nxt)
+        lay.addLayout(nav)
+
+        def update_nav():
+            i = stack.currentIndex()
+            back.setEnabled(i > 0)
+            step_lbl.setText(f"{i + 1} / {len(pages)}")
+            nxt.setText(trans.get("finish_button", "Finish")
+                        if i == len(pages) - 1 else trans.get("next_button", "Next"))
+
+        def go_next():
+            i = stack.currentIndex()
+            if i == len(pages) - 1:
+                dlg.accept()
+            else:
+                stack.setCurrentIndex(i + 1)
+                update_nav()
+
+        def go_back():
+            i = stack.currentIndex()
+            if i > 0:
+                stack.setCurrentIndex(i - 1)
+                update_nav()
+
+        skip.clicked.connect(dlg.accept)
+        nxt.clicked.connect(go_next)
+        back.clicked.connect(go_back)
+        update_nav()
+        self._rescale_all_fonts(root=dlg)
+        dlg.exec_()
+        self.settings.setValue("onboarding_done_version", wc_version.APP_VERSION)
 
     def closeEvent(self, event):
         self.save_settings()
