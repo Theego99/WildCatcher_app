@@ -88,33 +88,10 @@ class OnnxDetector:
             pred = self.session.run(None, {self.input_name: img})[0]
             pred = non_max_suppression(pred, conf_thres=detection_threshold)
 
-            h0, w0 = img_original.shape[0], img_original.shape[1]
-            gn = np.array([w0, h0, w0, h0], dtype=np.float32)  # normalization gain
-
             for det in pred:
-                if len(det):
-                    det[:, :4] = scale_boxes(img.shape[2:], det[:, :4],
-                                             img_original.shape).round()
-                    for row in det[::-1]:  # reversed, matching previous behavior
-                        xyxy = row[:4]
-                        conf = float(row[4])
-                        cls = int(row[5])
-
-                        xywh = (xyxy2xywh(xyxy.reshape(1, 4)) / gn).reshape(-1).tolist()
-                        api_box = convert_yolo_to_xywh(xywh)
-                        conf = truncate_float(conf, precision=CONF_DIGITS)
-
-                        if not self.use_model_native_classes:
-                            cls = cls + 1
-                            if cls not in (1, 2, 3):
-                                raise KeyError(f'{cls} is not a valid class.')
-
-                        detections.append({
-                            'category': str(cls),
-                            'conf': conf,
-                            'bbox': truncate_float_array(api_box, precision=COORD_DIGITS),
-                        })
-                        max_conf = max(max_conf, conf)
+                dets, mc = self._extract(det, img.shape[2:], img_original.shape)
+                detections.extend(dets)
+                max_conf = max(max_conf, mc)
 
         except Exception as e:
             result['failure'] = 'Failure inference'
@@ -123,6 +100,75 @@ class OnnxDetector:
         result['max_detection_conf'] = max_conf
         result['detections'] = detections
         return result
+
+    def _extract(self, det, input_hw, orig_shape):
+        """Scale + format the boxes for one image. Shared by the single and
+        batch paths so their outputs are byte-for-byte identical."""
+        detections = []
+        max_conf = 0.0
+        h0, w0 = orig_shape[0], orig_shape[1]
+        gn = np.array([w0, h0, w0, h0], dtype=np.float32)  # normalization gain
+        if len(det):
+            det[:, :4] = scale_boxes(input_hw, det[:, :4], orig_shape).round()
+            for row in det[::-1]:  # reversed, matching previous behavior
+                xyxy = row[:4]
+                conf = float(row[4])
+                cls = int(row[5])
+
+                xywh = (xyxy2xywh(xyxy.reshape(1, 4)) / gn).reshape(-1).tolist()
+                api_box = convert_yolo_to_xywh(xywh)
+                conf = truncate_float(conf, precision=CONF_DIGITS)
+
+                if not self.use_model_native_classes:
+                    cls = cls + 1
+                    if cls not in (1, 2, 3):
+                        raise KeyError(f'{cls} is not a valid class.')
+
+                detections.append({
+                    'category': str(cls),
+                    'conf': conf,
+                    'bbox': truncate_float_array(api_box, precision=COORD_DIGITS),
+                })
+                max_conf = max(max_conf, conf)
+        return detections, max_conf
+
+    def generate_detections_batch(self, images, image_ids=None,
+                                  detection_threshold=0.00001):
+        """Run a batch of images that letterbox to the SAME shape through the
+        detector in one session call. Returns a list of per-image result dicts
+        identical to generate_detections_one_image (verified by parity test).
+
+        The caller MUST group images by original size so their letterboxed
+        tensors stack — this preserves each image's exact rectangular letterbox
+        (auto=True), so results are identical to the per-image path.
+        """
+        if detection_threshold is None:
+            detection_threshold = 0
+        np_images = [im if isinstance(im, np.ndarray) else np.asarray(im)
+                     for im in images]
+        ids = image_ids or ['unknown'] * len(np_images)
+        results = [{'file': ids[i], 'detections': [], 'max_detection_conf': 0.0}
+                   for i in range(len(np_images))]
+        if not np_images:
+            return results
+        try:
+            target_size = OnnxDetector.IMAGE_SIZE
+            batch = [letterbox(im, new_shape=target_size,
+                               stride=OnnxDetector.STRIDE, auto=True)[0].transpose((2, 0, 1))
+                     for im in np_images]
+            inp = np.ascontiguousarray(np.stack(batch)).astype(np.float32)
+            inp /= 255.0
+            pred = self.session.run(None, {self.input_name: inp})[0]
+            preds = non_max_suppression(pred, conf_thres=detection_threshold)
+            for i, det in enumerate(preds):
+                dets, mc = self._extract(det, inp.shape[2:], np_images[i].shape)
+                results[i]['detections'] = dets
+                results[i]['max_detection_conf'] = mc
+        except Exception as e:
+            print('OnnxDetector: batch failed during inference: {}'.format(str(e)))
+            for r in results:
+                r['failure'] = 'Failure inference'
+        return results
 
 
 def convert_yolo_to_xywh(yolo_box):

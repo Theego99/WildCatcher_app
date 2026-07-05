@@ -19,12 +19,13 @@ from datetime import datetime
 _log = logging.getLogger("wildcatcher.processing")
 
 import cv2
+import numpy as np
 from PyQt5.QtCore import QThread, pyqtSignal
 
 # Hide the console window when shelling out to ffprobe on Windows.
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
 
-from process_images import process_images
+from process_images import process_images, load_image
 from load_detector import load_detector
 from wc_onnx import get_onnx_diagnostics
 from wc_sleep_guard import prevent_sleep, allow_sleep
@@ -426,8 +427,13 @@ def process_image_file(
     image_file, detector, det_confidence, det_per_class,
     output_dir, log,
     classifier_steps=None, non_destructive=False, known_prefixes=None,
+    precomputed_dets=None,
 ):
-    """Process one image. Returns stats dict with per-file detail."""
+    """Process one image. Returns stats dict with per-file detail.
+
+    `precomputed_dets` (raw detections from a batched detector pass) skips the
+    per-image detector call; None falls back to detecting this image alone.
+    """
     known_prefixes = known_prefixes or ()
     stats = {"empty": False, "human": 0, "animal": 0, "species": {}}
     fname = os.path.basename(image_file)
@@ -445,11 +451,14 @@ def process_image_file(
     _empty_detail["image_width"] = int(image.shape[1])
     _empty_detail["image_height"] = int(image.shape[0])
 
-    results = process_images(
-        im_files=[image_file], detector=detector,
-        confidence_threshold=0.0, use_image_queue=False, quiet=True,
-    )
-    raw_dets = results[0].get("detections", [])
+    if precomputed_dets is not None:
+        raw_dets = precomputed_dets
+    else:
+        results = process_images(
+            im_files=[image_file], detector=detector,
+            confidence_threshold=0.0, use_image_queue=False, quiet=True,
+        )
+        raw_dets = results[0].get("detections", [])
     detections = _filter_detections(raw_dets, det_confidence, det_per_class)
 
     if not detections:
@@ -1136,10 +1145,7 @@ class ProcessingThread(QThread):
             # Process images. Each file is isolated: one corrupt/odd file must
             # NEVER abort the whole batch (this was the "it processed a few then
             # produced nothing" bug — a single throw skipped the report entirely).
-            for fpath in image_files:
-                if self._stop_requested:
-                    self.log("Stopped by user.")
-                    break
+            def _process_one_image(fpath, precomputed):
                 sig = _file_signature(fpath)
                 try:
                     fs = process_image_file(
@@ -1147,6 +1153,7 @@ class ProcessingThread(QThread):
                         _output_dir(fpath), self.log,
                         classifier_steps=classifier_steps or None,
                         non_destructive=non_destructive, known_prefixes=known_prefixes,
+                        precomputed_dets=precomputed,
                     )
                 except Exception as e:
                     self.error_files += 1
@@ -1159,6 +1166,47 @@ class ProcessingThread(QThread):
                 if resume and self.processed_count % 50 == 0:
                     _save_manifest(output_root, self._manifest)
                 self._emit_progress(os.path.basename(fpath))
+
+            # Process images in chunks. When batch_size > 1, detection is BATCHED
+            # across same-shape images in one call (verified to give identical
+            # kept-detections vs per-image); crop/classify/rename then run per
+            # file. DEFAULT IS 1 (off): benchmarked SLOWER on DirectML at 1280px
+            # (dynamic shapes -> big tensors + per-shape re-optimization). Set
+            # cfg["batch_size"] > 1 on CUDA/static-shape deployments where it wins.
+            batch_size = max(1, int(cfg.get("batch_size", 1)))
+            from collections import defaultdict as _defaultdict
+            ci = 0
+            while ci < len(image_files):
+                if self._stop_requested:
+                    self.log("Stopped by user.")
+                    break
+                chunk = image_files[ci:ci + batch_size]
+                ci += batch_size
+                dets_map = {}
+                if batch_size > 1 and detector is not None:
+                    by_shape = _defaultdict(list)
+                    for p in chunk:
+                        try:
+                            arr = np.asarray(load_image(p))
+                        except Exception:
+                            arr = None
+                        if arr is not None and arr.ndim == 3:
+                            by_shape[arr.shape].append((p, arr))
+                    for _shape, items in by_shape.items():
+                        ids = [p for p, _ in items]
+                        ims = [a for _, a in items]
+                        try:
+                            for r in detector.generate_detections_batch(
+                                    ims, ids, detection_threshold=0.0):
+                                if "failure" not in r:
+                                    dets_map[r["file"]] = r["detections"]
+                        except Exception as e:
+                            self.log(f"  batch detect fell back to per-image: {e}")
+                for p in chunk:
+                    if self._stop_requested:
+                        self.log("Stopped by user.")
+                        break
+                    _process_one_image(p, dets_map.get(p))
 
             # Process videos (same per-file isolation).
             for fpath in video_files:
