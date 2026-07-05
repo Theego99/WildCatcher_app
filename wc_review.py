@@ -10,14 +10,16 @@ import csv
 from datetime import datetime
 
 from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QPixmap
+from PyQt5.QtGui import QPixmap, QImageReader
 from PyQt5.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QDoubleSpinBox,
+    QDialog, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QScrollArea, QWidget, QGridLayout, QMessageBox, QFrame,
 )
 
+from wc_widgets import NoScrollComboBox
+
 _UNLABELED = "(unlabeled)"
-MAX_CELLS = 400  # cap rendered thumbnails; use the filter to narrow
+MAX_CELLS = 200  # cap rendered thumbnails; use the filter to narrow further
 
 
 class _CropCell(QFrame):
@@ -33,15 +35,22 @@ class _CropCell(QFrame):
         thumb = QLabel()
         thumb.setAlignment(Qt.AlignCenter)
         thumb.setFixedSize(124, 124)
-        pm = QPixmap(img_path)
-        if not pm.isNull():
-            thumb.setPixmap(pm.scaled(124, 124, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        # Decode scaled (low memory even for big crops / many images).
+        reader = QImageReader(img_path)
+        reader.setAutoTransform(True)
+        sz = reader.size()
+        if sz.isValid() and (sz.width() > 124 or sz.height() > 124):
+            sz.scale(124, 124, Qt.KeepAspectRatio)
+            reader.setScaledSize(sz)
+        image = reader.read()
+        if not image.isNull():
+            thumb.setPixmap(QPixmap.fromImage(image))
         else:
             thumb.setText(trans.get("missing_crop", "(missing)"))
             thumb.setStyleSheet("color:#888;")
         lay.addWidget(thumb, alignment=Qt.AlignCenter)
 
-        self.combo = QComboBox()
+        self.combo = NoScrollComboBox()
         cur = crop.get("species") or _UNLABELED
         opts = list(species_options)
         if cur not in opts and cur != _UNLABELED:
@@ -95,17 +104,20 @@ class ResultsGallery(QDialog):
         lay = QVBoxLayout(self)
         bar = QHBoxLayout()
         bar.addWidget(QLabel(self.trans.get("filter_species", "Species:")))
-        self.filter_combo = QComboBox()
+        self.filter_combo = NoScrollComboBox()
         self.filter_combo.addItems([self.trans.get("all", "All")]
                                    + self.species_options + [_UNLABELED])
         self.filter_combo.currentIndexChanged.connect(self._render)
         bar.addWidget(self.filter_combo)
-        bar.addWidget(QLabel(self.trans.get("min_conf", "Min conf:")))
-        self.conf_spin = QDoubleSpinBox()
-        self.conf_spin.setRange(0.0, 1.0)
-        self.conf_spin.setSingleStep(0.05)
-        self.conf_spin.valueChanged.connect(self._render)
-        bar.addWidget(self.conf_spin)
+        bar.addWidget(QLabel(self.trans.get("sort_by", "Sort:")))
+        self.sort_combo = NoScrollComboBox()
+        self.sort_combo.addItems([
+            self.trans.get("sort_conf_low", "Confidence: low first"),
+            self.trans.get("sort_conf_high", "Confidence: high first"),
+            self.trans.get("sort_file", "File order"),
+        ])
+        self.sort_combo.currentIndexChanged.connect(self._render)
+        bar.addWidget(self.sort_combo)
         bar.addStretch()
         self.count_lbl = QLabel()
         bar.addWidget(self.count_lbl)
@@ -141,21 +153,24 @@ class ResultsGallery(QDialog):
         brow.addWidget(close)
         lay.addLayout(brow)
 
+    @staticmethod
+    def _conf(c):
+        v = c.get("species_conf")
+        if v is None:
+            v = c.get("det_conf")
+        return v if isinstance(v, (int, float)) else 0.0
+
     def _filtered(self):
         fsp = self.filter_combo.currentText()
         allt = self.trans.get("all", "All")
-        minc = self.conf_spin.value()
-        out = []
-        for c in self.crops:
-            conf = c.get("species_conf")
-            if conf is None:
-                conf = c.get("det_conf") or 0
-            if minc and (not isinstance(conf, (int, float)) or conf < minc):
-                continue
-            sp = c.get("species") or _UNLABELED
-            if fsp != allt and sp != fsp:
-                continue
-            out.append(c)
+        out = [c for c in self.crops
+               if fsp == allt or (c.get("species") or _UNLABELED) == fsp]
+        mode = self.sort_combo.currentIndex()
+        if mode == 0:          # low confidence first -> likely mislabels on top
+            out.sort(key=self._conf)
+        elif mode == 1:        # high confidence first
+            out.sort(key=self._conf, reverse=True)
+        # mode 2: file order (as loaded)
         return out
 
     def _render(self):
@@ -163,22 +178,31 @@ class ResultsGallery(QDialog):
             return
         for cell in self.cells:
             cell.setParent(None)
+            cell.deleteLater()
         self.cells = []
         while self.grid.count():
             it = self.grid.takeAt(0)
             w = it.widget()
             if w:
                 w.setParent(None)
+                w.deleteLater()
         flt = self._filtered()
         shown = flt[:MAX_CELLS]
         cols = 5
         for i, c in enumerate(shown):
-            img = os.path.join(self.detection_dir, c.get("path", c.get("crop", "")))
-            cell = _CropCell(c, img, self.species_options, self.trans)
+            try:
+                img = os.path.join(self.detection_dir, c.get("path", c.get("crop", "")))
+                cell = _CropCell(c, img, self.species_options, self.trans)
+            except Exception:
+                continue  # one bad crop must never crash the gallery
             self.cells.append(cell)
             self.grid.addWidget(cell, i // cols, i % cols)
-        extra = (f"  ({self.trans.get('showing', 'showing')} {len(shown)} "
-                 f"{self.trans.get('of', 'of')} {len(flt)})") if len(flt) > MAX_CELLS else ""
+        if len(flt) > MAX_CELLS:
+            extra = ("  (" + self.trans.get("showing", "showing") + f" {len(shown)} "
+                     + self.trans.get("of", "of") + f" {len(flt)}; "
+                     + self.trans.get("narrow_filter", "filter by species to see more") + ")")
+        else:
+            extra = ""
         self.count_lbl.setText(f"{len(flt)} {self.trans.get('crops_label', 'crops')}{extra}")
 
     def _save(self):

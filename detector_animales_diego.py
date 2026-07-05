@@ -1631,59 +1631,63 @@ class VideoDetectionApp(QMainWindow):
         return False
 
     def maybe_show_onboarding(self):
-        """Short first-run wizard orienting new users (once per version)."""
+        """First-run wizard: logo + live language picker + 3 orientation pages."""
         if self.settings.value("onboarding_done_version", "") == wc_version.APP_VERSION:
             return
-        trans = self.trans
-        pages = [
-            (trans.get("ob1_title", "Welcome to WildCatcher"),
-             trans.get("ob1_body",
-                       "WildCatcher automatically finds and identifies wildlife "
-                       "in your camera-trap photos and videos, then builds a report.")),
-            (trans.get("ob2_title", "How it works"),
-             trans.get("ob2_body",
-                       "1. Drop a folder of photos/videos, or click Browse.\n"
-                       "2. Click Start Processing.\n"
-                       "3. Get species-tagged files and a report in the "
-                       "'detection_data' folder.\n\n"
-                       "Use the Settings button (top-left) for models, output "
-                       "formats and options; the Language button for language and "
-                       "text size.")),
-            (trans.get("ob3_title", "Tips"),
-             trans.get("ob3_body",
-                       "- You're on a free 14-day trial; enter a license key "
-                       "anytime by clicking the logo.\n"
-                       "- After processing, click 'Review Results' to check and "
-                       "fix species labels.\n"
-                       "- Reports export to Excel, CSV, PDF, MegaDetector JSON "
-                       "and more.")),
-        ]
+        page_keys = [("ob1_title", "ob1_body"), ("ob2_title", "ob2_body"),
+                     ("ob3_title", "ob3_body")]
         dlg = QtWidgets.QDialog(self)
-        dlg.setWindowTitle(trans.get("welcome_title", "Welcome to WildCatcher"))
         dlg.setModal(True)
-        dlg.setMinimumSize(540, 380)
+        dlg.setMinimumSize(560, 430)
+        dlg.setWindowIcon(QIcon(resource_path("assets/app_icon.ico")))
         lay = QVBoxLayout(dlg)
+
+        # --- Header: logo + name + language flags ---
+        header = QHBoxLayout()
+        logo = QLabel()
+        logo.setPixmap(QPixmap(resource_path("assets/app_icon.ico")).scaled(
+            40, 40, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        header.addWidget(logo)
+        name_lbl = QLabel(wc_version.APP_NAME)
+        name_lbl.setStyleSheet("font-size:18px; font-weight:bold; color:#9bc472;")
+        header.addWidget(name_lbl)
+        header.addStretch()
+        for i, code in enumerate(LANGUAGE_CODES):
+            fb = QPushButton()
+            fb.setIcon(QIcon(resource_path(f"assets/flags/{code}.ico")))
+            fb.setIconSize(QSize(26, 26))
+            fb.setFixedSize(34, 30)
+            fb.setToolTip(LANGUAGES[i])
+            fb.setStyleSheet("QPushButton { border:none; }"
+                             "QPushButton:hover { background:#9bc472; border-radius:4px; }")
+            fb.clicked.connect(lambda _, idx=i: on_lang(idx))
+            header.addWidget(fb)
+        lay.addLayout(header)
+
+        # --- Pages ---
         stack = QStackedWidget()
-        for title, body in pages:
+        page_labels = []
+        for tkey, bkey in page_keys:
             page = QWidget()
             pl = QVBoxLayout(page)
-            t = QLabel(title)
+            t = QLabel()
             t.setStyleSheet("font-size:20px; font-weight:bold; color:#9bc472;")
-            pl.addWidget(t)
-            b = QLabel(body)
+            b = QLabel()
             b.setWordWrap(True)
             b.setStyleSheet("font-size:13px; color:#DDD;")
+            pl.addWidget(t)
             pl.addWidget(b)
             pl.addStretch()
+            page_labels.append((t, b, tkey, bkey))
             stack.addWidget(page)
         lay.addWidget(stack, 1)
 
         nav = QHBoxLayout()
-        skip = QPushButton(trans.get("skip_button", "Skip"))
+        skip = QPushButton()
         step_lbl = QLabel()
         step_lbl.setStyleSheet("color:#888;")
-        back = QPushButton(trans.get("back_button", "Back"))
-        nxt = QPushButton(trans.get("next_button", "Next"))
+        back = QPushButton()
+        nxt = QPushButton()
         nxt.setStyleSheet(IMPORT_BUTTON_STYLE)
         nav.addWidget(skip)
         nav.addWidget(step_lbl)
@@ -1695,13 +1699,28 @@ class VideoDetectionApp(QMainWindow):
         def update_nav():
             i = stack.currentIndex()
             back.setEnabled(i > 0)
-            step_lbl.setText(f"{i + 1} / {len(pages)}")
-            nxt.setText(trans.get("finish_button", "Finish")
-                        if i == len(pages) - 1 else trans.get("next_button", "Next"))
+            step_lbl.setText(f"{i + 1} / {len(page_keys)}")
+            nxt.setText(self.trans.get("finish_button", "Finish")
+                        if i == len(page_keys) - 1 else self.trans.get("next_button", "Next"))
+
+        def retranslate():
+            tr = self.trans
+            dlg.setWindowTitle(tr.get("welcome_title", "Welcome to WildCatcher"))
+            for (t, b, tk, bk) in page_labels:
+                t.setText(tr.get(tk, ""))
+                b.setText(tr.get(bk, ""))
+            skip.setText(tr.get("skip_button", "Skip"))
+            back.setText(tr.get("back_button", "Back"))
+            update_nav()
+
+        def on_lang(idx):
+            self.set_language_by_index(idx)
+            retranslate()
+            self._rescale_all_fonts(root=dlg)
 
         def go_next():
             i = stack.currentIndex()
-            if i == len(pages) - 1:
+            if i == len(page_keys) - 1:
                 dlg.accept()
             else:
                 stack.setCurrentIndex(i + 1)
@@ -1716,7 +1735,7 @@ class VideoDetectionApp(QMainWindow):
         skip.clicked.connect(dlg.accept)
         nxt.clicked.connect(go_next)
         back.clicked.connect(go_back)
-        update_nav()
+        retranslate()
         self._rescale_all_fonts(root=dlg)
         dlg.exec_()
         self.settings.setValue("onboarding_done_version", wc_version.APP_VERSION)

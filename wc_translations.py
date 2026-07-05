@@ -23,6 +23,9 @@ TRANSLATIONS = {
         "crops_label": "切り抜き", "showing": "表示中", "of": "/",
         "no_crops": "このフォルダーに確認できる検出はありません。\n（切り抜きは処理中に保存されます。）",
         "no_results_yet": "先にフォルダーを処理してください。",
+        "sort_by": "並び替え:", "sort_conf_low": "確信度: 低い順",
+        "sort_conf_high": "確信度: 高い順", "sort_file": "ファイル順",
+        "narrow_filter": "種で絞り込むとさらに表示",
         # --- Added 2026-07 (v2.1): shell / licensing / trial ---
         "about_title": "WildCatcher について",
         "version_label": "バージョン",
@@ -185,6 +188,9 @@ TRANSLATIONS = {
         "crops_label": "recortes", "showing": "mostrando", "of": "de",
         "no_crops": "No se encontraron detecciones revisables en esta carpeta.\n(Los recortes se guardan durante el procesamiento.)",
         "no_results_yet": "Procesa una carpeta primero.",
+        "sort_by": "Ordenar:", "sort_conf_low": "Confianza: menor primero",
+        "sort_conf_high": "Confianza: mayor primero", "sort_file": "Orden de archivo",
+        "narrow_filter": "filtra por especie para ver más",
         # --- Added 2026-07 (v2.1): shell / licensing / trial ---
         "about_title": "Acerca de WildCatcher",
         "version_label": "Versión",
@@ -346,6 +352,9 @@ TRANSLATIONS = {
         "crops_label": "裁剪", "showing": "显示", "of": "/",
         "no_crops": "此文件夹中未找到可查看的检测。\n（裁剪在处理过程中保存。）",
         "no_results_yet": "请先处理一个文件夹。",
+        "sort_by": "排序:", "sort_conf_low": "置信度: 从低到高",
+        "sort_conf_high": "置信度: 从高到低", "sort_file": "文件顺序",
+        "narrow_filter": "按物种筛选以查看更多",
         # --- Added 2026-07 (v2.1): shell / licensing / trial ---
         "about_title": "关于 WildCatcher",
         "version_label": "版本",
@@ -507,6 +516,9 @@ TRANSLATIONS = {
         "crops_label": "crops", "showing": "showing", "of": "of",
         "no_crops": "No reviewable detections found in this folder.\n(Crops are saved during processing.)",
         "no_results_yet": "Process a folder first.",
+        "sort_by": "Sort:", "sort_conf_low": "Confidence: low first",
+        "sort_conf_high": "Confidence: high first", "sort_file": "File order",
+        "narrow_filter": "filter by species to see more",
         # --- Added 2026-07 (v2.1): shell / licensing / trial ---
         "about_title": "About WildCatcher",
         "version_label": "Version",
@@ -668,6 +680,9 @@ TRANSLATIONS = {
         "crops_label": "크롭", "showing": "표시 중", "of": "/",
         "no_crops": "이 폴더에서 검토할 탐지 결과가 없습니다.\n(크롭은 처리 중에 저장됩니다.)",
         "no_results_yet": "먼저 폴더를 처리하세요.",
+        "sort_by": "정렬:", "sort_conf_low": "신뢰도: 낮은 순",
+        "sort_conf_high": "신뢰도: 높은 순", "sort_file": "파일 순서",
+        "narrow_filter": "종으로 필터링하여 더 보기",
         # --- Added 2026-07 (v2.1): shell / licensing / trial ---
         "about_title": "WildCatcher 정보",
         "version_label": "버전",
