@@ -75,6 +75,7 @@ hidden_imports = [
     'openpyxl',
     'psutil',
     'requests',
+    'fpdf',  # PDF report export (fpdf2)
 ]
 hiddenimports += hidden_imports
 

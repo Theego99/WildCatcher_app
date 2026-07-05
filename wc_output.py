@@ -101,11 +101,12 @@ DEFAULT_FIELDS = ["id", "file_name", "detection", "species", "time",
                   "video_length", "detection_accuracy", "species_accuracy"]
 DEFAULT_FORMATS = ["xlsx"]
 
-ALL_FORMATS = ["csv", "json", "xlsx", "sqlite",
+ALL_FORMATS = ["csv", "json", "xlsx", "sqlite", "pdf",
                "megadetector", "wildlife_insights", "timelapse"]
 FORMAT_LABELS = {  # i18n key is "format_<name>"
     "csv": "CSV (.csv)", "json": "JSON (.json)", "xlsx": "Excel (.xlsx)",
     "sqlite": "SQLite database (.db)",
+    "pdf": "PDF report (.pdf)",
     "megadetector": "MegaDetector JSON (.json)",
     "wildlife_insights": "Wildlife Insights CSV (.csv)",
     "timelapse": "Timelapse (.ddb/.tdb)",
@@ -325,6 +326,169 @@ def write_wildlife_insights(path, records):
             )])
 
 
+def _pdf_safe(text):
+    """fpdf2 core fonts are latin-1 only; replace unrepresentable chars so a
+    Japanese station/licensee name never crashes the PDF (shows as '?')."""
+    return str(text).encode("latin-1", "replace").decode("latin-1")
+
+
+def write_pdf(path, records, summary=None):
+    """A polished one-file PDF summary report (charts + per-station + GPS map).
+    Uses fpdf2 (pure-Python, no heavy chart deps)."""
+    from fpdf import FPDF
+
+    s = summary or {}
+    GREEN = (0x43, 0x78, 0x20)
+    LIME = (0x9b, 0xc4, 0x72)
+    GREY = (90, 90, 90)
+
+    pdf = FPDF(orientation="P", unit="mm", format="A4")
+    pdf.set_auto_page_break(auto=True, margin=16)
+    pdf.add_page()
+    usable_w = pdf.w - pdf.l_margin - pdf.r_margin
+
+    def line(h=6):
+        pdf.ln(h)
+
+    def heading(text):
+        pdf.ln(3)
+        pdf.set_font("Helvetica", "B", 13)
+        pdf.set_text_color(*GREEN)
+        pdf.cell(0, 8, _pdf_safe(text))
+        pdf.ln(9)
+        pdf.set_text_color(30, 30, 30)
+
+    # --- Title ---
+    pdf.set_font("Helvetica", "B", 20)
+    pdf.set_text_color(*GREEN)
+    pdf.cell(0, 12, "WildCatcher - Wildlife Detection Report")
+    pdf.ln(12)
+    pdf.set_font("Helvetica", "", 10)
+    pdf.set_text_color(*GREY)
+    pdf.cell(0, 6, _pdf_safe("Generated " + datetime.now().strftime("%Y-%m-%d %H:%M")))
+    pdf.ln(6)
+    if s.get("stopped_early"):
+        pdf.set_text_color(180, 80, 0)
+        pdf.cell(0, 6, "Note: run was stopped early; totals are partial.")
+        pdf.ln(6)
+
+    # --- Summary metrics ---
+    heading("Summary")
+    metrics = [
+        ("Files processed", s.get("total_processed", len(records))),
+        ("Animals", s.get("total_animal", 0)),
+        ("Humans / Vehicles", s.get("total_human", 0)),
+        ("Empty (no detection)", s.get("total_empty", 0)),
+        ("Capture events", s.get("total_events", 0)),
+        ("Stations", len({r.get("station", "") for r in records})),
+    ]
+    if s.get("total_errors"):
+        metrics.append(("Files skipped (errors)", s.get("total_errors")))
+    pdf.set_font("Helvetica", "", 11)
+    for label, val in metrics:
+        pdf.set_text_color(60, 60, 60)
+        pdf.cell(70, 7, _pdf_safe(label))
+        pdf.set_text_color(20, 20, 20)
+        pdf.set_font("Helvetica", "B", 11)
+        pdf.cell(0, 7, _pdf_safe(val))
+        pdf.set_font("Helvetica", "", 11)
+        pdf.ln(7)
+
+    # --- Species distribution bar chart ---
+    sc = s.get("species_counts") or {}
+    if sc:
+        heading("Species distribution")
+        pdf.set_font("Helvetica", "", 10)
+        maxc = max(sc.values()) or 1
+        label_w, num_w = 46.0, 16.0
+        bar_max = usable_w - label_w - num_w
+        x0 = pdf.l_margin + label_w
+        for sp in sorted(sc, key=lambda k: -sc[k]):
+            y = pdf.get_y()
+            pdf.set_text_color(40, 40, 40)
+            pdf.cell(label_w, 7, _pdf_safe(sp)[:24])
+            bw = (sc[sp] / maxc) * bar_max
+            pdf.set_fill_color(*LIME)
+            pdf.rect(x0, y + 1.4, max(0.4, bw), 4.4, style="F")
+            pdf.set_xy(x0 + bw + 2, y)
+            pdf.cell(num_w, 7, str(sc[sp]))
+            pdf.ln(7)
+
+    # --- Per-station table ---
+    st = s.get("station_counts") or {}
+    st = {k: v for k, v in st.items() if k and k != "(unsorted)"}
+    if st:
+        heading("Files per station")
+        pdf.set_font("Helvetica", "B", 10)
+        pdf.set_fill_color(*GREEN)
+        pdf.set_text_color(255, 255, 255)
+        pdf.cell(usable_w * 0.6, 7, "  Station", border=0, fill=True)
+        pdf.cell(usable_w * 0.4, 7, "  Files", border=0, fill=True)
+        pdf.ln(7)
+        pdf.set_font("Helvetica", "", 10)
+        pdf.set_text_color(30, 30, 30)
+        for i, name in enumerate(sorted(st)):
+            if i % 2 == 0:
+                pdf.set_fill_color(238, 242, 235)
+            else:
+                pdf.set_fill_color(255, 255, 255)
+            pdf.cell(usable_w * 0.6, 6.5, "  " + _pdf_safe(name)[:40], fill=True)
+            pdf.cell(usable_w * 0.4, 6.5, "  " + str(st[name]), fill=True)
+            pdf.ln(6.5)
+
+    # --- GPS map (simple scatter) ---
+    pts = []
+    for r in records:
+        try:
+            lon = float(r.get("gps_longitude"))
+            lat = float(r.get("gps_latitude"))
+        except (TypeError, ValueError):
+            continue
+        if lon == 0 and lat == 0:
+            continue
+        pts.append((lon, lat))
+    if pts:
+        heading("Detection locations (GPS)")
+        map_h = 70.0
+        x0, y0 = pdf.l_margin, pdf.get_y()
+        pdf.set_draw_color(*GREEN)
+        pdf.set_fill_color(245, 248, 243)
+        pdf.rect(x0, y0, usable_w, map_h, style="DF")
+        lons = [p[0] for p in pts]
+        lats = [p[1] for p in pts]
+        lon_min, lon_max = min(lons), max(lons)
+        lat_min, lat_max = min(lats), max(lats)
+        lon_span = (lon_max - lon_min) or 1e-6
+        lat_span = (lat_max - lat_min) or 1e-6
+        pad = 5.0
+        pdf.set_fill_color(*GREEN)
+        for lon, lat in pts:
+            px = x0 + pad + (lon - lon_min) / lon_span * (usable_w - 2 * pad)
+            # invert lat so north is up
+            py = y0 + pad + (lat_max - lat) / lat_span * (map_h - 2 * pad)
+            pdf.ellipse(px - 0.9, py - 0.9, 1.8, 1.8, style="F")
+        pdf.set_y(y0 + map_h + 1)
+        pdf.set_font("Helvetica", "", 8)
+        pdf.set_text_color(*GREY)
+        pdf.cell(0, 5, _pdf_safe(
+            f"Lat {lat_min:.4f} to {lat_max:.4f}, Lon {lon_min:.4f} to {lon_max:.4f}  "
+            f"({len(pts)} located)"))
+        pdf.ln(6)
+
+    # --- Footer ---
+    try:
+        import wc_version
+        ver = wc_version.APP_VERSION
+    except Exception:
+        ver = ""
+    pdf.set_y(-14)
+    pdf.set_font("Helvetica", "I", 8)
+    pdf.set_text_color(*GREY)
+    pdf.cell(0, 6, _pdf_safe(f"Generated by WildCatcher {ver}"), align="C")
+
+    pdf.output(path)
+
+
 def write_timelapse(out_dir, records):
     """
     Best-effort native Timelapse export: a template (.tdb) and a data (.ddb)
@@ -461,6 +625,9 @@ def write_reports(records, out_dir, fields=None, formats=None, summary=None, log
             elif fmt == "sqlite":
                 written.append(_write_locked_safe(
                     base + ".db", lambda p: write_sqlite(p, records, fields), log))
+            elif fmt == "pdf":
+                written.append(_write_locked_safe(
+                    base + ".pdf", lambda p: write_pdf(p, records, summary), log))
             elif fmt == "megadetector":
                 written.append(_write_locked_safe(
                     base + "_megadetector.json",
