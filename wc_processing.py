@@ -518,6 +518,16 @@ def process_image_file(
         if crops_saved == 0 and detections:
             log(f"  Warning: {fname} had {len(detections)} detections but 0 crops saved")
 
+        # Per-crop records for the in-app review gallery.
+        for i, d in enumerate(dets_raw):
+            cn = f"{base}_crop_{i}.jpg"
+            final = f"{d['species']}_{cn}" if d.get("species") else cn
+            stats.setdefault("crops", []).append({
+                "crop": final, "source": fname, "category": d["category"],
+                "det_conf": d["conf"], "species": d.get("species"),
+                "species_conf": d.get("species_conf"),
+            })
+
     # Compute per-file detail for Excel report
     from collections import Counter
     if len(animal_confs) >= len(human_confs) and animal_confs:
@@ -1061,6 +1071,7 @@ class ProcessingThread(QThread):
             total_crops_saved = 0
             species_counts = {}
             records = []
+            all_crops = []  # per-crop records for the review gallery
             record_id = 0
 
             # Names of models used this run (for the optional "Models Used" field)
@@ -1104,6 +1115,13 @@ class ProcessingThread(QThread):
                         detail.get("file_name", ""), known_prefixes)
                     detail["models_used"] = models_used_str
                     records.append(detail)
+                    rel = detail.get("relative_path", "")
+                    for c in fstats.get("crops", []):
+                        cc = dict(c)
+                        cc["path"] = (rel + "/" + c["crop"]) if rel else c["crop"]
+                        cc["station"] = detail.get("station", "")
+                        cc["time"] = detail.get("time", "")
+                        all_crops.append(cc)
 
             self._start_time = time.time()
             self._emit_progress("", "starting")
@@ -1173,6 +1191,13 @@ class ProcessingThread(QThread):
             # Persist the resume manifest (final flush).
             if resume:
                 _save_manifest(output_root, self._manifest)
+
+            # Per-crop manifest for the in-app review gallery.
+            try:
+                with open(os.path.join(output_root, "crops.json"), "w", encoding="utf-8") as f:
+                    json.dump({"crops": all_crops}, f, ensure_ascii=False)
+            except Exception as e:
+                _log.info("crops manifest write failed: %s", e)
 
             # Capture-event grouping + per-station tallies (auto-detected).
             gap = int(cfg.get("event_gap_seconds", 60))

@@ -5,6 +5,15 @@ LANGUAGE_CODES = ["jp", "es", "cn", "en", "kr"]
 
 TRANSLATIONS = {
     "Japanese": {
+        # --- Added 2026-07 (v2.1b): review gallery ---
+        "review_title": "結果を確認", "review_results": "結果を確認",
+        "filter_species": "種:", "min_conf": "最小確信度:", "all": "すべて",
+        "save_corrections": "修正を保存", "no_changes": "保存する変更はありません。",
+        "corrections_saved": "{n} 件の修正を保存しました。切り抜きを再ラベル付けしました。",
+        "missing_crop": "(見つかりません)", "conf_short": "確信度",
+        "crops_label": "切り抜き", "showing": "表示中", "of": "/",
+        "no_crops": "このフォルダーに確認できる検出はありません。\n（切り抜きは処理中に保存されます。）",
+        "no_results_yet": "先にフォルダーを処理してください。",
         # --- Added 2026-07 (v2.1): shell / licensing / trial ---
         "about_title": "WildCatcher について",
         "version_label": "バージョン",
@@ -149,6 +158,15 @@ TRANSLATIONS = {
         "general_settings": "一般設定",
     },
     "Spanish": {
+        # --- Added 2026-07 (v2.1b): review gallery ---
+        "review_title": "Revisar resultados", "review_results": "Revisar resultados",
+        "filter_species": "Especie:", "min_conf": "Conf. mín:", "all": "Todas",
+        "save_corrections": "Guardar correcciones", "no_changes": "No hay cambios que guardar.",
+        "corrections_saved": "Se guardaron {n} corrección(es); recortes reetiquetados.",
+        "missing_crop": "(falta)", "conf_short": "conf",
+        "crops_label": "recortes", "showing": "mostrando", "of": "de",
+        "no_crops": "No se encontraron detecciones revisables en esta carpeta.\n(Los recortes se guardan durante el procesamiento.)",
+        "no_results_yet": "Procesa una carpeta primero.",
         # --- Added 2026-07 (v2.1): shell / licensing / trial ---
         "about_title": "Acerca de WildCatcher",
         "version_label": "Versión",
@@ -292,6 +310,15 @@ TRANSLATIONS = {
         "general_settings": "Configuración General",
     },
     "Chinese": {
+        # --- Added 2026-07 (v2.1b): review gallery ---
+        "review_title": "查看结果", "review_results": "查看结果",
+        "filter_species": "物种:", "min_conf": "最低置信度:", "all": "全部",
+        "save_corrections": "保存更正", "no_changes": "没有要保存的更改。",
+        "corrections_saved": "已保存 {n} 项更正；裁剪已重新标注。",
+        "missing_crop": "(缺失)", "conf_short": "置信度",
+        "crops_label": "裁剪", "showing": "显示", "of": "/",
+        "no_crops": "此文件夹中未找到可查看的检测。\n（裁剪在处理过程中保存。）",
+        "no_results_yet": "请先处理一个文件夹。",
         # --- Added 2026-07 (v2.1): shell / licensing / trial ---
         "about_title": "关于 WildCatcher",
         "version_label": "版本",
@@ -435,6 +462,15 @@ TRANSLATIONS = {
         "general_settings": "常规设置",
     },
     "English": {
+        # --- Added 2026-07 (v2.1b): review gallery ---
+        "review_title": "Review Results", "review_results": "Review Results",
+        "filter_species": "Species:", "min_conf": "Min conf:", "all": "All",
+        "save_corrections": "Save corrections", "no_changes": "No changes to save.",
+        "corrections_saved": "Saved {n} correction(s); crops re-labeled.",
+        "missing_crop": "(missing)", "conf_short": "conf",
+        "crops_label": "crops", "showing": "showing", "of": "of",
+        "no_crops": "No reviewable detections found in this folder.\n(Crops are saved during processing.)",
+        "no_results_yet": "Process a folder first.",
         # --- Added 2026-07 (v2.1): shell / licensing / trial ---
         "about_title": "About WildCatcher",
         "version_label": "Version",
@@ -578,6 +614,15 @@ TRANSLATIONS = {
         "general_settings": "General Settings",
     },
     "Korean": {
+        # --- Added 2026-07 (v2.1b): review gallery ---
+        "review_title": "결과 검토", "review_results": "결과 검토",
+        "filter_species": "종:", "min_conf": "최소 신뢰도:", "all": "전체",
+        "save_corrections": "수정 저장", "no_changes": "저장할 변경 사항이 없습니다.",
+        "corrections_saved": "{n}건의 수정을 저장했습니다. 크롭을 다시 라벨링했습니다.",
+        "missing_crop": "(없음)", "conf_short": "신뢰도",
+        "crops_label": "크롭", "showing": "표시 중", "of": "/",
+        "no_crops": "이 폴더에서 검토할 탐지 결과가 없습니다.\n(크롭은 처리 중에 저장됩니다.)",
+        "no_results_yet": "먼저 폴더를 처리하세요.",
         # --- Added 2026-07 (v2.1): shell / licensing / trial ---
         "about_title": "WildCatcher 정보",
         "version_label": "버전",

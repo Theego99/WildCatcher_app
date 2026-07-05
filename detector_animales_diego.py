@@ -54,6 +54,7 @@ from wc_widgets import (
     FolderDropViewer, ModelPipelineWidget, CollapsibleSection, scale_css_fontsize,
 )
 from video_player import VideoPlayer
+from wc_review import ResultsGallery
 import wc_output
 
 # Add yolov5 to path for detector
@@ -348,6 +349,16 @@ class VideoDetectionApp(QMainWindow):
         self.progress_detail_label.setStyleSheet("color:#9bc472; font-size:12px;")
         self.progress_detail_label.setVisible(False)
         self.main_area_layout.addWidget(self.progress_detail_label)
+
+        # Re-open the crop review gallery for the current folder anytime.
+        self.review_button = QPushButton("Review Results")
+        self.review_button.setStyleSheet(
+            "QPushButton { background:#1E2E4E; color:#6B9FD4; border:1px solid #3C4C6C;"
+            " border-radius:4px; padding:5px 12px; font-size:13px; }"
+            "QPushButton:hover { background:#2E3E6E; }")
+        self.review_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.review_button.clicked.connect(lambda: self.open_results_review())
+        self.main_area_layout.addWidget(self.review_button, alignment=Qt.AlignLeft)
 
     def _build_folder_viewer(self):
         self.folder_viewer = FolderDropViewer(self)
@@ -789,6 +800,8 @@ class VideoDetectionApp(QMainWindow):
             self.remove_prefixes_button.setText(trans["remove_prefixes_button"])
             self.remove_prefixes_button.setText(trans["remove_prefixes_button"])
 
+        if hasattr(self, "review_button"):
+            self.review_button.setText(trans.get("review_results", "Review Results"))
         if hasattr(self, "folder_viewer"):
             self.folder_viewer.set_hint_text(trans.get("drop_hint", "Drag & drop a folder here"))
         if hasattr(self, "_general_header"):
@@ -1064,16 +1077,44 @@ class VideoDetectionApp(QMainWindow):
             box.setWindowTitle(self.trans.get("done_title", "Done"))
         box.setText(text)
         box.addButton(QMessageBox.Ok)
-        # Offer a shortcut to the results when there's a folder to show.
+        # Offer shortcuts to the results when there's a folder to show.
         out_dir = getattr(self, "_last_output_dir", None)
-        open_btn = None
+        open_btn = review_btn = None
         if out_dir and os.path.isdir(out_dir):
+            if os.path.exists(os.path.join(out_dir, "crops.json")):
+                review_btn = box.addButton(
+                    self.trans.get("review_results", "Review results"),
+                    QMessageBox.ActionRole)
             open_btn = box.addButton(
                 self.trans.get("open_results_folder", "Open results folder"),
                 QMessageBox.ActionRole)
         box.exec_()
-        if open_btn is not None and box.clickedButton() is open_btn:
+        clicked = box.clickedButton()
+        if open_btn is not None and clicked is open_btn:
             self._open_folder(out_dir)
+        elif review_btn is not None and clicked is review_btn:
+            self.open_results_review(out_dir)
+
+    def open_results_review(self, folder=None):
+        """Open the crop review + label-correction gallery for a run's output."""
+        folder = folder or getattr(self, "_last_output_dir", None)
+        if not folder:
+            inp = self.input_dir_line_edit.text()
+            if inp:
+                folder = os.path.join(inp, "detection_data")
+        if not folder or not os.path.isdir(folder):
+            QMessageBox.information(
+                self, self.trans.get("review_title", "Review Results"),
+                self.trans.get("no_results_yet", "Process a folder first."))
+            return
+        import wc_models as models_mod
+        species = set()
+        for e in models_mod.get_all_models():
+            for cn in (e.get("class_names") or []):
+                species.add(cn)
+        dlg = ResultsGallery(folder, sorted(species), trans=self.trans, parent=self)
+        self._rescale_all_fonts(root=dlg)
+        dlg.exec_()
 
     def _open_folder(self, path):
         """Open a folder in the OS file browser (Explorer / Finder / xdg)."""
