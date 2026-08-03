@@ -378,6 +378,11 @@ def _classify_and_sort_crop(
 
         except Exception as e:
             log(f"  Classification error ({entry.get('name', '?')}): {e}")
+            # Same visibility principle as unreadable-source/crop-write
+            # failures: a classifier throwing is not a normal "no confident
+            # match" outcome and must not disappear into a log line nobody
+            # reads. Surfaced by the caller as stats["error"] + processing_notes.
+            stats["classification_errors"] = stats.get("classification_errors", 0) + 1
 
     # Rename crop with species prefix
     if species and os.path.exists(crop_path):
@@ -465,12 +470,21 @@ def _open_video_capture(video_file):
     if cap.isOpened():
         return cap, None
     cap.release()
+    tmp_path = None
     try:
         ext = os.path.splitext(video_file)[1] or ".mp4"
-        fd, tmp_path = tempfile.mkstemp(suffix=ext, prefix="wc_vid_")
+        fd, tmp_path = tempfile.mkstemp(suffix=ext, prefix="wc_vid_",
+                                        dir=_ascii_temp_dir())
         os.close(fd)
         shutil.copyfile(video_file, tmp_path)
     except Exception:
+        # Clean up a possibly empty/partial temp file (e.g. the NAS dropped
+        # mid-copy) instead of leaking it.
+        if tmp_path:
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
         return None, None
     cap2 = cv2.VideoCapture(tmp_path)
     if cap2.isOpened():
@@ -481,6 +495,29 @@ def _open_video_capture(video_file):
     except Exception:
         pass
     return None, None
+
+
+def _ascii_temp_dir():
+    """A guaranteed-ASCII scratch directory for the cv2.VideoCapture temp-copy
+    fallback. tempfile.gettempdir() is normally fine, but it's derived from the
+    OS username -- if THAT contains non-ASCII characters (plausible for the
+    Japanese client base this app targets), the temp path would hit the exact
+    same cv2-unreadable-path problem this fallback exists to work around. Fall
+    back to a fixed location directly under the system drive if so."""
+    d = tempfile.gettempdir()
+    try:
+        d.encode("ascii")
+        return d
+    except UnicodeEncodeError:
+        pass
+    fallback = os.path.join(os.environ.get("SystemDrive", "C:") + os.sep,
+                            "WildCatcher_tmp")
+    try:
+        os.makedirs(fallback, exist_ok=True)
+        fallback.encode("ascii")
+        return fallback
+    except Exception:
+        return d  # last resort -- may still fail, but no worse than before
 
 
 def _safe_write_crop(path, image, log):
@@ -497,6 +534,19 @@ def _safe_write_crop(path, image, log):
     except Exception as e:
         log(f"  Error writing crop {os.path.basename(path)}: {e}")
         return False
+
+
+def _partial_failure_note(crop_write_failures, crops_total, classification_errors):
+    """Build a human-readable processing_notes string covering both crop-write
+    and classification failures for one file, or None if there were none."""
+    parts = []
+    if crop_write_failures:
+        parts.append(f"{crop_write_failures} of {crops_total} crop(s) failed to save")
+    if classification_errors:
+        parts.append(f"{classification_errors} classification error(s)")
+    if not parts:
+        return None
+    return "; ".join(parts) + " (species/detections below may be incomplete)."
 
 
 # ---------------------------------------------------------------------------
@@ -617,6 +667,9 @@ def process_image_file(
             log(f"  ⚠ {fname}: {crop_write_failures} of {len(detections)} "
                f"crop(s) failed to save")
             stats["error"] = True
+        if stats.get("classification_errors"):
+            log(f"  ⚠ {fname}: {stats['classification_errors']} classification error(s)")
+            stats["error"] = True
 
         # Per-crop records for the in-app review gallery.
         for i, d in enumerate(dets_raw):
@@ -651,10 +704,10 @@ def process_image_file(
                "image_height": int(image.shape[0]),
                "detections_raw": dets_raw},
     )
-    if crop_write_failures:
-        stats["detail"]["processing_notes"] = (
-            f"{crop_write_failures} of {len(detections)} crop(s) failed to save "
-            "(species below may be incomplete).")
+    note = _partial_failure_note(crop_write_failures, len(detections),
+                                 stats.get("classification_errors", 0))
+    if note:
+        stats["detail"]["processing_notes"] = note
 
     # Rename the original file with species or category prefix
     if classified_species:
@@ -878,6 +931,9 @@ def process_video_file(
         log(f"  ⚠ {fname}: {crop_write_failures} of {crops_attempted} "
            f"crop(s) failed to save")
         stats["error"] = True
+    if stats.get("classification_errors"):
+        log(f"  ⚠ {fname}: {stats['classification_errors']} classification error(s)")
+        stats["error"] = True
 
     # Compute per-file detail for Excel report
     from collections import Counter
@@ -903,10 +959,10 @@ def process_video_file(
         extra={"video_length": video_duration, "video_fps": round(fps, 1),
                "frames_processed": len(frames), "detections_raw": dets_raw},
     )
-    if crop_write_failures:
-        stats["detail"]["processing_notes"] = (
-            f"{crop_write_failures} of {crops_attempted} crop(s) failed to save "
-            "(species below may be incomplete).")
+    note = _partial_failure_note(crop_write_failures, crops_attempted,
+                                 stats.get("classification_errors", 0))
+    if note:
+        stats["detail"]["processing_notes"] = note
 
     # Rename original with species or category prefix
     if classified_species:
@@ -966,9 +1022,36 @@ class ProcessingThread(QThread):
         self.error_files = 0
         self._stop_requested = False
         self._start_time = None
+        self._consecutive_errors = 0
+        self._streak_warned = False
 
     def notify(self, level, text):
         self.message_signal.emit(level, text)
+
+    CONSECUTIVE_ERROR_THRESHOLD = 10
+
+    def _note_file_error(self, had_error):
+        """Track error streaks. Many failures in a row usually means something
+        systemic (NAS dropped, permissions changed, drive unplugged) rather
+        than N unrelated bad files -- that's worth one loud, unmissable
+        warning instead of grinding silently through the rest of a
+        multi-hour batch. This is exactly the class of problem that took two
+        weeks to diagnose when it only showed up as a quiet log line."""
+        if had_error:
+            self._consecutive_errors += 1
+            if self._consecutive_errors >= self.CONSECUTIVE_ERROR_THRESHOLD and not self._streak_warned:
+                self._streak_warned = True
+                self.notify(
+                    "warning",
+                    f"The last {self._consecutive_errors} files in a row all "
+                    "failed to process.\n\nThis usually means something "
+                    "systemic, not N unrelated bad files -- e.g. a network "
+                    "drive disconnected, a permissions change, or the input "
+                    "folder became unavailable. Processing will continue, but "
+                    "you may want to check the source folder / connection.\n\n"
+                    "See the Logs panel for per-file details.")
+        else:
+            self._consecutive_errors = 0
 
     def _emit_progress(self, current="", stage=""):
         """Emit both the simple count and a rich detail (rate/ETA/current)."""
@@ -1295,6 +1378,7 @@ class ProcessingThread(QThread):
                         # be silently counted as a clean result. See
                         # _imread_unicode/_safe_write_crop.
                         self.error_files += 1
+                self._note_file_error(bool(fs.get("error")))
                 _accum(fs)
                 if sig:
                     self._manifest.add(sig)
@@ -1367,6 +1451,7 @@ class ProcessingThread(QThread):
                 else:
                     if fs.get("error"):
                         self.error_files += 1
+                self._note_file_error(bool(fs.get("error")))
                 _accum(fs)
                 if sig:
                     self._manifest.add(sig)

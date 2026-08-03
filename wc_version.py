@@ -6,7 +6,7 @@ from here yet, so bump those too — see build.bat / installer.iss).
 """
 
 APP_NAME = "WildCatcher"
-APP_VERSION = "2.1.0"
+APP_VERSION = "2.1.1"
 APP_PUBLISHER = "WildCatcher"          # TODO: set to your legal/company name
 SUPPORT_EMAIL = "support@wildcatcher.app"  # TODO: set your real support address
 APP_WEBSITE = "https://github.com/Theego99/WildCatcher_app"

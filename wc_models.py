@@ -381,8 +381,9 @@ def classify_image(image_path, entry):
     """
     session, class_names, head_type, input_name, output_dim = load_classifier(entry)
 
-    img = PILImage.open(image_path).convert("RGB").resize(
-        (CLASSIFICATION_IMG_SIZE, CLASSIFICATION_IMG_SIZE), PILImage.BILINEAR)
+    with PILImage.open(image_path) as src:
+        img = src.convert("RGB").resize(
+            (CLASSIFICATION_IMG_SIZE, CLASSIFICATION_IMG_SIZE), PILImage.BILINEAR)
     arr = np.asarray(img, dtype=np.float32) / 255.0
     arr = (arr - IMAGENET_MEAN) / IMAGENET_STD
     arr = np.ascontiguousarray(arr.transpose(2, 0, 1)[None])  # NCHW

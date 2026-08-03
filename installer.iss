@@ -10,7 +10,7 @@
 ; ============================================================
 
 #define MyAppName "WildCatcher"
-#define MyAppVersion "2.1.0"
+#define MyAppVersion "2.1.1"
 #define MyAppPublisher "WildCatcher"
 #define MyAppExeName "WildCatcher.exe"
 ; Path to the PyInstaller output folder

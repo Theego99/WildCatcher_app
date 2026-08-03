@@ -11,6 +11,9 @@ install the CPU-ONLY torch build before packaging to keep the bundle small.
 import os
 import sys
 
+sys.path.insert(0, SPECPATH)  # PyInstaller spec-file global: dir of this file
+import wc_version  # single source of truth for the app version
+
 block_cipher = None
 
 # PyInstaller rejects a .ico icon on macOS (wants .icns); use the icon only on Windows.
@@ -165,6 +168,6 @@ if sys.platform == 'darwin':
         bundle_identifier='com.wildcatcher.app',
         info_plist={
             'NSHighResolutionCapable': True,
-            'CFBundleShortVersionString': '2.1.0',
+            'CFBundleShortVersionString': wc_version.APP_VERSION,
         },
     )
