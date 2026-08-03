@@ -14,6 +14,8 @@ import json
 import time
 import logging
 import subprocess
+import tempfile
+import shutil
 from datetime import datetime
 
 _log = logging.getLogger("wildcatcher.processing")
@@ -404,15 +406,92 @@ def _resolve_entry(model_id):
     return None
 
 
+# ---------------------------------------------------------------------------
+# Unicode-safe image I/O.
+#
+# cv2.imread/imwrite route through a non-Unicode fopen() on Windows (the
+# system's ANSI codepage). A path containing characters outside that codepage
+# — e.g. Japanese folder/file names on many NAS setups — makes them silently
+# return None/False, with no exception. Python's own open()/numpy file I/O go
+# through the Unicode-aware WinAPI, so encode/decode through a byte buffer
+# instead of letting cv2 touch the path directly. This is UNC-safe: it never
+# passes the path to cv2 at all, only to numpy/Python's open(), which already
+# handles \\server\share paths correctly.
+# ---------------------------------------------------------------------------
+def _imread_unicode(path, flags=cv2.IMREAD_COLOR):
+    """Unicode/NAS-path-safe replacement for cv2.imread(). Returns None on
+    failure, same contract as cv2.imread."""
+    try:
+        buf = np.fromfile(path, dtype=np.uint8)
+    except Exception:
+        return None
+    if buf.size == 0:
+        return None
+    try:
+        return cv2.imdecode(buf, flags)
+    except Exception:
+        return None
+
+
+def _imwrite_unicode(path, image, ext=None):
+    """Unicode/NAS-path-safe replacement for cv2.imwrite(). Returns True/False,
+    same contract as cv2.imwrite."""
+    try:
+        if ext is None:
+            ext = os.path.splitext(path)[1] or ".jpg"
+        ok, buf = cv2.imencode(ext, image)
+        if not ok:
+            return False
+        buf.tofile(path)
+        return True
+    except Exception:
+        return False
+
+
+def _open_video_capture(video_file):
+    """Unicode/NAS-path-safe cv2.VideoCapture open.
+
+    cv2.VideoCapture has the same non-Unicode path limitation as imread/imwrite
+    on Windows. Unlike a still image, a video can't be read through an in-memory
+    buffer with cv2's API, so if the direct open fails, fall back to copying the
+    file to a short-lived ASCII-named temp file (via shutil.copyfile, which
+    goes through Python's Unicode-safe I/O) and opening that instead.
+
+    Returns (cap, tmp_path). `cap` is None if the video truly could not be
+    opened. `tmp_path` is the temp copy to delete after use, or None if the
+    direct open succeeded (nothing to clean up).
+    """
+    cap = cv2.VideoCapture(video_file)
+    if cap.isOpened():
+        return cap, None
+    cap.release()
+    try:
+        ext = os.path.splitext(video_file)[1] or ".mp4"
+        fd, tmp_path = tempfile.mkstemp(suffix=ext, prefix="wc_vid_")
+        os.close(fd)
+        shutil.copyfile(video_file, tmp_path)
+    except Exception:
+        return None, None
+    cap2 = cv2.VideoCapture(tmp_path)
+    if cap2.isOpened():
+        return cap2, tmp_path
+    cap2.release()
+    try:
+        os.remove(tmp_path)
+    except Exception:
+        pass
+    return None, None
+
+
 def _safe_write_crop(path, image, log):
     """Write a crop image with error handling. Returns True on success."""
     try:
         if image is None or image.size == 0:
             log(f"  Warning: empty crop, skipping {os.path.basename(path)}")
             return False
-        ok = cv2.imwrite(path, image)
+        ok = _imwrite_unicode(path, image)
         if not ok:
-            log(f"  Warning: cv2.imwrite failed for {os.path.basename(path)}")
+            log(f"  Warning: failed to write crop {os.path.basename(path)}")
             return False
         return True
     except Exception as e:
@@ -442,10 +521,18 @@ def process_image_file(
     _empty_detail = _build_detail(image_file, "image", image_time, "", "",
                                   None, None, stats, extra=exif)
 
-    image = cv2.imread(image_file)
+    image = _imread_unicode(image_file)
     if image is None:
-        log(f"Could not read: {fname}")
-        stats["empty"] = True
+        # NOT "empty" — we don't actually know what's in this file, our
+        # tooling failed to read it (corrupt file, unsupported codec, or a
+        # path issue). Flagging it as an error keeps that distinct from a
+        # legitimate "camera saw nothing" result.
+        log(f"  ⚠ Could not read image (unreadable file or path): {fname}")
+        stats["error"] = True
+        _empty_detail["detection"] = "error"
+        _empty_detail["processing_notes"] = (
+            "Source image could not be read (corrupt file, unsupported "
+            "format, or an unreadable path).")
         stats["detail"] = _empty_detail
         return stats
     _empty_detail["image_width"] = int(image.shape[1])
@@ -500,6 +587,7 @@ def process_image_file(
     dets_raw = [{"category": d["category"], "conf": d["conf"], "bbox": d["bbox"],
                  "species": None, "species_conf": None} for d in detections]
 
+    crop_write_failures = 0
     if output_dir is not None:
         base = os.path.splitext(fname)[0]
         crops_saved = 0
@@ -509,6 +597,7 @@ def process_image_file(
             crop_path = os.path.join(output_dir, crop_name)
 
             if not _safe_write_crop(crop_path, cropped, log):
+                crop_write_failures += 1
                 continue
             crops_saved += 1
 
@@ -524,8 +613,10 @@ def process_image_file(
                     dets_raw[i]["species"] = sp
                     dets_raw[i]["species_conf"] = sp_conf
 
-        if crops_saved == 0 and detections:
-            log(f"  Warning: {fname} had {len(detections)} detections but 0 crops saved")
+        if crop_write_failures:
+            log(f"  ⚠ {fname}: {crop_write_failures} of {len(detections)} "
+               f"crop(s) failed to save")
+            stats["error"] = True
 
         # Per-crop records for the in-app review gallery.
         for i, d in enumerate(dets_raw):
@@ -560,6 +651,10 @@ def process_image_file(
                "image_height": int(image.shape[0]),
                "detections_raw": dets_raw},
     )
+    if crop_write_failures:
+        stats["detail"]["processing_notes"] = (
+            f"{crop_write_failures} of {len(detections)} crop(s) failed to save "
+            "(species below may be incomplete).")
 
     # Rename the original file with species or category prefix
     if classified_species:
@@ -612,10 +707,17 @@ def process_video_file(
     _empty_detail = _build_detail(video_file, "video", video_time, "", "",
                                   None, None, stats, extra={"video_length": "N/A"})
 
-    cap = cv2.VideoCapture(video_file)
-    if not cap.isOpened():
-        log(f"Could not open video: {fname}")
-        stats["empty"] = True
+    cap, tmp_video_path = _open_video_capture(video_file)
+    if cap is None:
+        # NOT "empty" — same reasoning as the image case: we couldn't open the
+        # file at all (corrupt file, unsupported codec, or an unreadable path),
+        # so we don't actually know what's on it.
+        log(f"  ⚠ Could not open video (unreadable file or path): {fname}")
+        stats["error"] = True
+        _empty_detail["detection"] = "error"
+        _empty_detail["processing_notes"] = (
+            "Video could not be opened (corrupt file, unsupported codec, or "
+            "an unreadable path).")
         stats["detail"] = _empty_detail
         return stats
 
@@ -630,6 +732,12 @@ def process_video_file(
     # Sample frames straight into memory — no per-frame temp JPEGs on disk.
     frames = []
 
+    # Release the capture handle (and any temp copy) the MOMENT frame reading
+    # is done — before ANY later code runs, including the destructive-mode
+    # rename below. Windows refuses to rename/move a file that's still open
+    # (WinError 32); the previous code deferred release to a `finally` at the
+    # very end of this function, so the rename ran while `cap` (and the file
+    # it holds open) was still alive.
     try:
         count = 0
         while cap.isOpened():
@@ -641,176 +749,197 @@ def process_video_file(
                 break
             if count % every_n_frames == 0:
                 frames.append(frame)  # BGR (kept for cropping/saving)
-
-        if not frames:
-            stats["empty"] = True
-            stats["detail"] = _empty_detail
-            return stats
-
-        # Detector wants RGB; convert a view per frame, keep BGR for crops.
-        results = []
-        for fr in frames:
-            rgb = cv2.cvtColor(fr, cv2.COLOR_BGR2RGB)
-            results.append(detector.generate_detections_one_image(
-                rgb, video_file, detection_threshold=0.0))
-
-        best_det, best_frame, best_conf = None, None, -1
-        frames_with_dets = []
-
-        for i, res in enumerate(results):
-            valid = _filter_detections(
-                res.get("detections", []), det_confidence, det_per_class,
-            )
-            if valid:
-                frame = frames[i]
-                if save_all and output_dir:
-                    frames_with_dets.append((frame, valid))
-                else:
-                    for d in valid:
-                        if d["conf"] > best_conf:
-                            best_conf = d["conf"]
-                            best_det = d
-                            best_frame = frame.copy()
-
-        has_dets = bool(frames_with_dets) or best_det is not None
-        if not has_dets:
-            stats["empty"] = True
-            empty_opts = det_per_class.get("empty", {})
-            if empty_opts.get("delete_original", False) and not non_destructive:
-                try:
-                    os.remove(video_file)
-                    log(f"Deleted (no detections): {fname}")
-                except Exception as e:
-                    log(f"Delete failed: {e}")
-            elif not non_destructive:
-                new_name = PREFIX_EMPTY + _strip_known_prefix(fname, known_prefixes)
-                new_path = os.path.join(os.path.dirname(video_file), new_name)
-                if not os.path.exists(new_path):
-                    try:
-                        os.rename(video_file, new_path)
-                    except Exception:
-                        pass
-            stats["detail"] = _empty_detail
-            return stats
-
-        all_dets = []
-        if save_all and frames_with_dets:
-            for _, dets in frames_with_dets:
-                all_dets.extend(dets)
-        elif best_det:
-            all_dets = [best_det]
-        animal_confs, human_confs = [], []
-        for d in all_dets:
-            if d["category"] == "1":
-                stats["animal"] += 1
-                animal_confs.append(d["conf"])
-            else:
-                stats["human"] += 1
-                human_confs.append(d["conf"])
-
-        # Crops + classify BEFORE renaming original
-        current_file = video_file
-        classified_species = []
-        classified_confs = []  # (species, confidence) pairs for report
-
-        if output_dir is not None:
-            base = os.path.splitext(fname)[0]
-            crop_idx = 0
-
-            if save_all and frames_with_dets:
-                for frame, dets in frames_with_dets:
-                    for det in dets:
-                        cropped = crop_image(frame, det["bbox"])
-                        cn = f"{base}_crop_{crop_idx}.jpg"
-                        cp = os.path.join(output_dir, cn)
-                        if _safe_write_crop(cp, cropped, log):
-                            if classifier_steps:
-                                sp, sp_conf, _ = _classify_and_sort_crop(
-                                    cp, cn, output_dir, det,
-                                    classifier_steps, stats, log,
-                                    original_path=current_file,
-                                    non_destructive=non_destructive,
-                                )
-                                if sp:
-                                    classified_species.append(sp)
-                                    classified_confs.append((sp, sp_conf))
-                        crop_idx += 1
-            elif best_det and best_frame is not None:
-                cropped = crop_image(best_frame, best_det["bbox"])
-                cn = f"{base}_crop_0.jpg"
-                cp = os.path.join(output_dir, cn)
-                if _safe_write_crop(cp, cropped, log):
-                    if classifier_steps:
-                        sp, sp_conf, _ = _classify_and_sort_crop(
-                            cp, cn, output_dir, best_det,
-                            classifier_steps, stats, log,
-                            original_path=current_file,
-                            non_destructive=non_destructive,
-                        )
-                        if sp:
-                            classified_species.append(sp)
-                            classified_confs.append((sp, sp_conf))
-
-        # Compute per-file detail for Excel report
-        from collections import Counter
-        if len(animal_confs) >= len(human_confs) and animal_confs:
-            det_label = "animal"
-            best_det_conf = max(animal_confs)
-        elif human_confs:
-            det_label = "human"
-            best_det_conf = max(human_confs)
-        else:
-            det_label = ""
-            best_det_conf = None
-        sp_label, sp_acc = "", None
-        if classified_confs and det_label == "animal":
-            dom = Counter(s for s, _ in classified_confs).most_common(1)[0][0]
-            sp_label = dom
-            sp_acc = max(c for s, c in classified_confs if s == dom)
-        dets_raw = [{"category": d["category"], "conf": d["conf"], "bbox": d["bbox"],
-                     "species": sp_label or None, "species_conf": None} for d in all_dets]
-        stats["detail"] = _build_detail(
-            video_file, "video", video_time, det_label, sp_label,
-            best_det_conf, sp_acc, stats,
-            extra={"video_length": video_duration, "video_fps": round(fps, 1),
-                   "frames_processed": len(frames), "detections_raw": dets_raw},
-        )
-
-        # Rename original with species or category prefix
-        if classified_species:
-            from collections import Counter
-            dominant = Counter(classified_species).most_common(1)[0][0]
-            prefix = f"{dominant}_"
-        elif all_dets[-1]["category"] == "1":
-            prefix = PREFIX_ANIMAL
-        else:
-            prefix = PREFIX_HUMAN
-
-        if not non_destructive:
-            new_name = prefix + _strip_known_prefix(fname, known_prefixes)
-            new_path = os.path.join(os.path.dirname(video_file), new_name)
-            if os.path.abspath(new_path) != os.path.abspath(current_file) and not os.path.exists(new_path):
-                try:
-                    os.rename(current_file, new_path)
-                    current_file = new_path
-                    fname = new_name
-                except Exception as e:
-                    log(f"Rename failed for {fname}: {e}")
-
-        # Handle per-class delete_original for detector categories
-        det_category = "animal" if all_dets[-1]["category"] == "1" else "human"
-        cat_opts = det_per_class.get(det_category, {})
-        if cat_opts.get("delete_original", False) and not non_destructive:
-            target = new_path if os.path.exists(new_path) else current_file
-            if os.path.exists(target):
-                try:
-                    os.remove(target)
-                    log(f"Deleted original ({det_category}): {os.path.basename(target)}")
-                except Exception as e:
-                    log(f"Delete failed: {e}")
-
     finally:
         cap.release()
+        if tmp_video_path:
+            try:
+                os.remove(tmp_video_path)
+            except Exception:
+                pass
+
+    if not frames:
+        stats["empty"] = True
+        stats["detail"] = _empty_detail
+        return stats
+
+    # Detector wants RGB; convert a view per frame, keep BGR for crops.
+    results = []
+    for fr in frames:
+        rgb = cv2.cvtColor(fr, cv2.COLOR_BGR2RGB)
+        results.append(detector.generate_detections_one_image(
+            rgb, video_file, detection_threshold=0.0))
+
+    best_det, best_frame, best_conf = None, None, -1
+    frames_with_dets = []
+
+    for i, res in enumerate(results):
+        valid = _filter_detections(
+            res.get("detections", []), det_confidence, det_per_class,
+        )
+        if valid:
+            frame = frames[i]
+            if save_all and output_dir:
+                frames_with_dets.append((frame, valid))
+            else:
+                for d in valid:
+                    if d["conf"] > best_conf:
+                        best_conf = d["conf"]
+                        best_det = d
+                        best_frame = frame.copy()
+
+    has_dets = bool(frames_with_dets) or best_det is not None
+    if not has_dets:
+        stats["empty"] = True
+        empty_opts = det_per_class.get("empty", {})
+        if empty_opts.get("delete_original", False) and not non_destructive:
+            try:
+                os.remove(video_file)
+                log(f"Deleted (no detections): {fname}")
+            except Exception as e:
+                log(f"Delete failed: {e}")
+        elif not non_destructive:
+            new_name = PREFIX_EMPTY + _strip_known_prefix(fname, known_prefixes)
+            new_path = os.path.join(os.path.dirname(video_file), new_name)
+            if not os.path.exists(new_path):
+                try:
+                    os.rename(video_file, new_path)
+                except Exception:
+                    pass
+        stats["detail"] = _empty_detail
+        return stats
+
+    all_dets = []
+    if save_all and frames_with_dets:
+        for _, dets in frames_with_dets:
+            all_dets.extend(dets)
+    elif best_det:
+        all_dets = [best_det]
+    animal_confs, human_confs = [], []
+    for d in all_dets:
+        if d["category"] == "1":
+            stats["animal"] += 1
+            animal_confs.append(d["conf"])
+        else:
+            stats["human"] += 1
+            human_confs.append(d["conf"])
+
+    # Crops + classify BEFORE renaming original
+    current_file = video_file
+    classified_species = []
+    classified_confs = []  # (species, confidence) pairs for report
+    crop_write_failures = 0
+    crops_attempted = 0
+
+    if output_dir is not None:
+        base = os.path.splitext(fname)[0]
+        crop_idx = 0
+
+        if save_all and frames_with_dets:
+            for frame, dets in frames_with_dets:
+                for det in dets:
+                    crops_attempted += 1
+                    cropped = crop_image(frame, det["bbox"])
+                    cn = f"{base}_crop_{crop_idx}.jpg"
+                    cp = os.path.join(output_dir, cn)
+                    if _safe_write_crop(cp, cropped, log):
+                        if classifier_steps:
+                            sp, sp_conf, _ = _classify_and_sort_crop(
+                                cp, cn, output_dir, det,
+                                classifier_steps, stats, log,
+                                original_path=current_file,
+                                non_destructive=non_destructive,
+                            )
+                            if sp:
+                                classified_species.append(sp)
+                                classified_confs.append((sp, sp_conf))
+                    else:
+                        crop_write_failures += 1
+                    crop_idx += 1
+        elif best_det and best_frame is not None:
+            crops_attempted += 1
+            cropped = crop_image(best_frame, best_det["bbox"])
+            cn = f"{base}_crop_0.jpg"
+            cp = os.path.join(output_dir, cn)
+            if _safe_write_crop(cp, cropped, log):
+                if classifier_steps:
+                    sp, sp_conf, _ = _classify_and_sort_crop(
+                        cp, cn, output_dir, best_det,
+                        classifier_steps, stats, log,
+                        original_path=current_file,
+                        non_destructive=non_destructive,
+                    )
+                    if sp:
+                        classified_species.append(sp)
+                        classified_confs.append((sp, sp_conf))
+            else:
+                crop_write_failures += 1
+
+    if crop_write_failures:
+        log(f"  ⚠ {fname}: {crop_write_failures} of {crops_attempted} "
+           f"crop(s) failed to save")
+        stats["error"] = True
+
+    # Compute per-file detail for Excel report
+    from collections import Counter
+    if len(animal_confs) >= len(human_confs) and animal_confs:
+        det_label = "animal"
+        best_det_conf = max(animal_confs)
+    elif human_confs:
+        det_label = "human"
+        best_det_conf = max(human_confs)
+    else:
+        det_label = ""
+        best_det_conf = None
+    sp_label, sp_acc = "", None
+    if classified_confs and det_label == "animal":
+        dom = Counter(s for s, _ in classified_confs).most_common(1)[0][0]
+        sp_label = dom
+        sp_acc = max(c for s, c in classified_confs if s == dom)
+    dets_raw = [{"category": d["category"], "conf": d["conf"], "bbox": d["bbox"],
+                 "species": sp_label or None, "species_conf": None} for d in all_dets]
+    stats["detail"] = _build_detail(
+        video_file, "video", video_time, det_label, sp_label,
+        best_det_conf, sp_acc, stats,
+        extra={"video_length": video_duration, "video_fps": round(fps, 1),
+               "frames_processed": len(frames), "detections_raw": dets_raw},
+    )
+    if crop_write_failures:
+        stats["detail"]["processing_notes"] = (
+            f"{crop_write_failures} of {crops_attempted} crop(s) failed to save "
+            "(species below may be incomplete).")
+
+    # Rename original with species or category prefix
+    if classified_species:
+        from collections import Counter
+        dominant = Counter(classified_species).most_common(1)[0][0]
+        prefix = f"{dominant}_"
+    elif all_dets[-1]["category"] == "1":
+        prefix = PREFIX_ANIMAL
+    else:
+        prefix = PREFIX_HUMAN
+
+    if not non_destructive:
+        new_name = prefix + _strip_known_prefix(fname, known_prefixes)
+        new_path = os.path.join(os.path.dirname(video_file), new_name)
+        if os.path.abspath(new_path) != os.path.abspath(current_file) and not os.path.exists(new_path):
+            try:
+                os.rename(current_file, new_path)
+                current_file = new_path
+                fname = new_name
+            except Exception as e:
+                log(f"Rename failed for {fname}: {e}")
+
+    # Handle per-class delete_original for detector categories
+    det_category = "animal" if all_dets[-1]["category"] == "1" else "human"
+    cat_opts = det_per_class.get(det_category, {})
+    if cat_opts.get("delete_original", False) and not non_destructive:
+        target = new_path if os.path.exists(new_path) else current_file
+        if os.path.exists(target):
+            try:
+                os.remove(target)
+                log(f"Deleted original ({det_category}): {os.path.basename(target)}")
+            except Exception as e:
+                log(f"Delete failed: {e}")
 
     return stats
 
@@ -1139,7 +1268,7 @@ class ProcessingThread(QThread):
                 """Minimal record so a failed file still shows up in the report."""
                 rec = _base_record(filepath, file_type)
                 rec["detection"] = "error"
-                rec["notes"] = str(err)
+                rec["processing_notes"] = str(err)
                 return {"empty": False, "error": True, "detail": rec}
 
             # Process images. Each file is isolated: one corrupt/odd file must
@@ -1159,6 +1288,13 @@ class ProcessingThread(QThread):
                     self.error_files += 1
                     self.log(f"  ⚠ Skipped (error) {os.path.basename(fpath)}: {e}")
                     fs = _error_record(fpath, "image", e)
+                else:
+                    if fs.get("error"):
+                        # Didn't raise, but the file failed a real step
+                        # (unreadable source / crop write failure) -- must not
+                        # be silently counted as a clean result. See
+                        # _imread_unicode/_safe_write_crop.
+                        self.error_files += 1
                 _accum(fs)
                 if sig:
                     self._manifest.add(sig)
@@ -1228,6 +1364,9 @@ class ProcessingThread(QThread):
                     self.error_files += 1
                     self.log(f"  ⚠ Skipped (error) {os.path.basename(fpath)}: {e}")
                     fs = _error_record(fpath, "video", e)
+                else:
+                    if fs.get("error"):
+                        self.error_files += 1
                 _accum(fs)
                 if sig:
                     self._manifest.add(sig)

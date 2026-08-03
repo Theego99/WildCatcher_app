@@ -91,6 +91,7 @@ FIELDS = [
     ("gps_longitude",      "GPS Longitude",       GROUP_EXIF,      "field_gps_lon"),
     ("processing_date",    "Processing Date",     GROUP_RUN,       "field_processing_date"),
     ("models_used",        "Models Used",         GROUP_RUN,       "field_models_used"),
+    ("processing_notes",   "Processing Notes",    GROUP_RUN,       "field_processing_notes"),
 ]
 
 FIELD_BY_KEY = {f[0]: f for f in FIELDS}
