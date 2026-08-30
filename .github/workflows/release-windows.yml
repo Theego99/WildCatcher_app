@@ -82,6 +82,15 @@ jobs:
           }
         shell: powershell
 
+      - name: Smoke test - verify CLI exe runs
+        run: |
+          dist\WildCatcher\WildCatcher-CLI.exe --list-profiles
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "ERROR: WildCatcher-CLI.exe exited with code $LASTEXITCODE"
+            exit 1
+          }
+        shell: powershell
+
       - name: Show folder size
         run: |
           $size = (Get-ChildItem dist/WildCatcher/ -Recurse | Measure-Object -Property Length -Sum).Sum / 1MB

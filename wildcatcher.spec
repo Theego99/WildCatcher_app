@@ -94,8 +94,7 @@ hiddenimports += hidden_imports
 # ---------------------------------------------------------------------------
 # Analysis
 # ---------------------------------------------------------------------------
-a = Analysis(
-    ['detector_animales_diego.py'],
+_common_analysis_kwargs = dict(
     pathex=['.'],
     binaries=binaries,
     datas=datas,
@@ -125,7 +124,22 @@ a = Analysis(
     noarchive=False,
 )
 
+a = Analysis(['detector_animales_diego.py'], **_common_analysis_kwargs)
+
+# Second entry point: the heavy-use CLI (wc_cli.py) a client asked for so they
+# can queue multiple folders for unattended processing. Shares the same
+# dependency bundle as the GUI via MERGE() so this doesn't duplicate
+# onnxruntime/torch/PyQt5 in the installed folder -- the whole point of the
+# ONNX migration was to keep the install small.
+a_cli = Analysis(['wc_cli.py'], **_common_analysis_kwargs)
+
+MERGE(
+    (a, 'detector_animales_diego', 'WildCatcher'),
+    (a_cli, 'wc_cli', 'WildCatcher-CLI'),
+)
+
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+pyz_cli = PYZ(a_cli.pure, a_cli.zipped_data, cipher=block_cipher)
 
 exe = EXE(
     pyz,
@@ -146,11 +160,34 @@ exe = EXE(
     icon=_app_icon,
 )
 
+exe_cli = EXE(
+    pyz_cli,
+    a_cli.scripts,
+    [],
+    exclude_binaries=True,
+    name='WildCatcher-CLI',
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,
+    console=True,  # CLI tool -- needs a real console for stdout/stdin
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+    icon=_app_icon,
+)
+
 coll = COLLECT(
     exe,
     a.binaries,
     a.zipfiles,
     a.datas,
+    exe_cli,
+    a_cli.binaries,
+    a_cli.zipfiles,
+    a_cli.datas,
     strip=False,
     upx=False,
     upx_exclude=[],

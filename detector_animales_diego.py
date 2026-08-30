@@ -30,6 +30,7 @@ from PyQt5.QtWidgets import (
     QTextEdit, QCheckBox, QSpinBox, QMessageBox,
     QSizePolicy, QDesktopWidget, QScrollArea, QFrame,
     QGraphicsOpacityEffect, QSplitter, QStackedWidget,
+    QComboBox, QInputDialog,
 )
 
 # WildCatcher modules
@@ -56,6 +57,7 @@ from wc_widgets import (
 from video_player import VideoPlayer
 from wc_review import ResultsGallery
 import wc_output
+import wc_profiles
 
 # Add yolov5 to path for detector
 yolov5_path = os.path.join(os.path.dirname(__file__), "yolov5")
@@ -232,6 +234,7 @@ class VideoDetectionApp(QMainWindow):
         self._init_settings_panel()
         self._init_language_panel()
         self.load_settings()
+        self._apply_default_profile_if_set()
         self.settings_content_widget.hide()
         self.language_content_widget.hide()
         self.settings_panel.hide()
@@ -426,6 +429,12 @@ class VideoDetectionApp(QMainWindow):
         self._sep2.setStyleSheet("color:#333;")
         self._output_section = self._build_output_settings_widget()
 
+        # Named config profiles (save/load a whole configuration by name)
+        self._sep_profiles = QFrame()
+        self._sep_profiles.setFrameShape(QFrame.HLine)
+        self._sep_profiles.setStyleSheet("color:#333;")
+        self._profiles_section = self._build_profiles_row()
+
     def _build_output_settings_widget(self):
         """A panel of checkboxes letting the client pick output formats + columns."""
         trans = self.trans
@@ -529,6 +538,8 @@ class VideoDetectionApp(QMainWindow):
 
         widgets = [
             self._general_header,
+            self._profiles_section,
+            self._sep_profiles,
             self.frame_interval_label, self.frame_interval_spinbox,
             self.processing_duration_label, self.processing_duration_spinbox,
             self.save_all_checkbox,
@@ -685,6 +696,171 @@ class VideoDetectionApp(QMainWindow):
 
         # Scale the (re)built language panel (incl. the 文字サイズ label) to zoom.
         self._rescale_all_fonts()
+
+    # ------------------------------------------------------------------
+    # Named config profiles (save/load/default a whole configuration).
+    # Requested by a heavy-use client so a run always uses a known, named
+    # configuration instead of "whatever was last left in the app" -- also
+    # usable headlessly from wc_cli.py, sharing the same on-disk profiles.
+    # ------------------------------------------------------------------
+    def _build_profiles_row(self):
+        container = QWidget()
+        outer = QVBoxLayout()
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(4)
+        container.setLayout(outer)
+
+        header = QLabel("Config Profiles")
+        header.setStyleSheet("font-size:16px; color:#9bc472; font-weight:bold;")
+        self._profiles_header_label = header
+        outer.addWidget(header)
+
+        row = QHBoxLayout()
+        self.profile_combo = QComboBox()
+        self.profile_combo.setStyleSheet(
+            "QComboBox { background:#2E2E2E; color:#FFF; border:1px solid #444; padding:3px; }"
+        )
+        self.profile_combo.currentTextChanged.connect(self._sync_profile_default_checkbox)
+        row.addWidget(self.profile_combo, 1)
+
+        btn_style = (
+            "QPushButton { background:#1E4E1E; color:#9bc472; border:1px solid #3C5C3C;"
+            " border-radius:4px; padding:4px 10px; }"
+            "QPushButton:hover { background:#2E6E2E; }"
+        )
+        self.profile_save_btn = QPushButton("Save As…")
+        self.profile_save_btn.setStyleSheet(btn_style)
+        self.profile_save_btn.clicked.connect(self._on_save_profile)
+        row.addWidget(self.profile_save_btn)
+
+        self.profile_load_btn = QPushButton("Load")
+        self.profile_load_btn.setStyleSheet(btn_style)
+        self.profile_load_btn.clicked.connect(self._on_load_profile)
+        row.addWidget(self.profile_load_btn)
+
+        self.profile_delete_btn = QPushButton("Delete")
+        self.profile_delete_btn.setStyleSheet(btn_style)
+        self.profile_delete_btn.clicked.connect(self._on_delete_profile)
+        row.addWidget(self.profile_delete_btn)
+
+        outer.addLayout(row)
+
+        self.profile_default_checkbox = QCheckBox("Load this profile automatically on startup")
+        self.profile_default_checkbox.stateChanged.connect(self._on_profile_default_toggled)
+        outer.addWidget(self.profile_default_checkbox)
+
+        self._refresh_profiles_combo()
+        return container
+
+    def _refresh_profiles_combo(self, select=None):
+        names = wc_profiles.list_profiles()
+        default = wc_profiles.get_default_profile_name()
+        self.profile_combo.blockSignals(True)
+        self.profile_combo.clear()
+        self.profile_combo.addItems(names)
+        if select and select in names:
+            self.profile_combo.setCurrentText(select)
+        elif default and default in names:
+            self.profile_combo.setCurrentText(default)
+        self.profile_combo.blockSignals(False)
+        self._sync_profile_default_checkbox()
+
+    def _sync_profile_default_checkbox(self, *_args):
+        current = self.profile_combo.currentText()
+        default = wc_profiles.get_default_profile_name()
+        self.profile_default_checkbox.blockSignals(True)
+        self.profile_default_checkbox.setChecked(bool(current) and current == default)
+        self.profile_default_checkbox.setEnabled(bool(current))
+        self.profile_default_checkbox.blockSignals(False)
+
+    def _current_profile_settings(self):
+        """Gather the profile-relevant subset of current UI state (mirrors save_settings)."""
+        out_fields, out_formats = self._get_output_config()
+        return {
+            "pipeline_steps": self.pipeline_widget.get_pipeline_config(),
+            "output_fields": out_fields,
+            "output_formats": out_formats,
+            "frame_interval": self.frame_interval_spinbox.value(),
+            "processing_duration": self.processing_duration_spinbox.value(),
+            "save_all_frames": self.save_all_checkbox.isChecked(),
+            "resume_processing": self.resume_checkbox.isChecked(),
+            "non_destructive": self.nondestructive_checkbox.isChecked(),
+        }
+
+    def _apply_profile_settings(self, settings):
+        """Apply a saved profile dict to the current UI (mirrors load_settings)."""
+        if "frame_interval" in settings:
+            self.frame_interval_spinbox.setValue(int(settings["frame_interval"]))
+        if "processing_duration" in settings:
+            self.processing_duration_spinbox.setValue(int(settings["processing_duration"]))
+        if "save_all_frames" in settings:
+            self.save_all_checkbox.setChecked(bool(settings["save_all_frames"]))
+        if "resume_processing" in settings:
+            self.resume_checkbox.setChecked(bool(settings["resume_processing"]))
+        if "non_destructive" in settings:
+            self.nondestructive_checkbox.setChecked(bool(settings["non_destructive"]))
+        of = settings.get("output_fields") or wc_output.DEFAULT_FIELDS
+        ofm = settings.get("output_formats") or wc_output.DEFAULT_FORMATS
+        self._apply_output_config(of, ofm)
+        steps = settings.get("pipeline_steps")
+        if steps:
+            self.pipeline_widget.set_pipeline_config(steps)
+
+    def _apply_default_profile_if_set(self):
+        name = wc_profiles.get_default_profile_name()
+        if not name:
+            return
+        settings = wc_profiles.load_profile(name)
+        if settings:
+            self._apply_profile_settings(settings)
+            self.log(f"Loaded default profile '{name}'.")
+
+    def _on_save_profile(self):
+        name, ok = QInputDialog.getText(
+            self, "Save Profile", "Profile name:",
+            text=self.profile_combo.currentText())
+        name = (name or "").strip()
+        if not ok or not name:
+            return
+        try:
+            wc_profiles.save_profile(name, self._current_profile_settings())
+        except Exception as e:
+            QMessageBox.warning(self, "WildCatcher", str(e))
+            return
+        self._refresh_profiles_combo(select=name)
+        self.log(f"Saved profile '{name}'.")
+
+    def _on_load_profile(self):
+        name = self.profile_combo.currentText()
+        if not name:
+            return
+        settings = wc_profiles.load_profile(name)
+        if settings is None:
+            QMessageBox.warning(self, "WildCatcher", f"Profile '{name}' could not be loaded.")
+            return
+        self._apply_profile_settings(settings)
+        self.log(f"Loaded profile '{name}'.")
+
+    def _on_delete_profile(self):
+        name = self.profile_combo.currentText()
+        if not name:
+            return
+        msg_box = QMessageBox(self)
+        msg_box.setWindowTitle("Delete Profile")
+        msg_box.setText(f"Delete profile '{name}'?")
+        msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        msg_box.setStyleSheet(DARK_MSGBOX_STYLE)
+        if msg_box.exec_() != QMessageBox.Yes:
+            return
+        wc_profiles.delete_profile(name)
+        self._refresh_profiles_combo()
+        self.log(f"Deleted profile '{name}'.")
+
+    def _on_profile_default_toggled(self, state):
+        name = self.profile_combo.currentText()
+        if not name:
+            return
+        wc_profiles.set_default_profile_name(name if state else None)
 
     # ------------------------------------------------------------------
     # Settings persistence

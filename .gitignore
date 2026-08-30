@@ -30,6 +30,9 @@ desktop.ini
 # License files (user-specific, do not commit)
 license.wcl
 
+# Saved CLI/GUI config profiles (per-install runtime data, not source)
+profiles/
+
 # Vendor signing key — SECRET. Never commit. Anyone with it can mint licenses.
 vendor_private_key.pem
 

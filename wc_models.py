@@ -334,6 +334,19 @@ def _apply_conversion_to_registry(entry, onnx_filename, meta):
         save_registry(reg)
 
 
+def unload_classifiers():
+    """Drop all cached classifier sessions, freeing their memory.
+
+    Classifiers stay cached in `_loaded_classifiers` for the life of the
+    process (normally desirable -- one load per GUI session). A long CLI run
+    that walks many folders back-to-back keeps accumulating/holding ONNX
+    Runtime sessions in that same cache, which is the "model refresh between
+    folders" a heavy-use client asked for to avoid memory growth on
+    multi-hour unattended batches (see wc_cli.py). The next process_*_file
+    call after this simply reloads on demand via load_classifier()."""
+    _loaded_classifiers.clear()
+
+
 def load_classifier(entry):
     """Load (and cache) an ONNX classifier session.
     Returns (session, class_names, head_type, input_name, output_dim)."""

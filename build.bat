@@ -45,6 +45,7 @@ echo PyInstaller build complete.
 echo.
 echo [3.5/4] Signing app executable (no-op if no cert configured)...
 powershell -NoProfile -ExecutionPolicy Bypass -File "sign_windows.ps1" "dist\WildCatcher\WildCatcher.exe"
+powershell -NoProfile -ExecutionPolicy Bypass -File "sign_windows.ps1" "dist\WildCatcher\WildCatcher-CLI.exe"
 if not exist "dist\WildCatcher\models" mkdir "dist\WildCatcher\models"
 copy /y "installer_data\registry.json" "dist\WildCatcher\models\registry.json" >nul
 if /i "%1"=="exe" (
