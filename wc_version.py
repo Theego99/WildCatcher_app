@@ -9,8 +9,6 @@ import re
 APP_NAME = "WildCatcher"
 APP_VERSION = "2.1.2"
 APP_PUBLISHER = "WildCatcher"          # TODO: set to your legal/company name
-SUPPORT_EMAIL = "support@wildcatcher.app"  # TODO: set your real support address
-APP_WEBSITE = "https://github.com/Theego99/WildCatcher_app"
 
 # Auto-update: the app queries this GitHub repo's latest release. Works with the
 # existing GitHub Actions release pipeline (no extra hosting needed).

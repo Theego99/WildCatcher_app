@@ -50,7 +50,6 @@ different computer. {expiry_line}
 
 Best regards,
 {publisher}
-{support}
 """
 
 
@@ -165,8 +164,7 @@ class LicenseGUI(QWidget):
                        if expiry == "never" else f"It is valid until {expiry}.")
         self.email_out.setPlainText(EMAIL_TEMPLATE.format(
             app=wc_version.APP_NAME, licensee=licensee, key=key, device=device,
-            expiry_line=expiry_line, publisher=wc_version.APP_PUBLISHER,
-            support=wc_version.SUPPORT_EMAIL))
+            expiry_line=expiry_line, publisher=wc_version.APP_PUBLISHER))
 
 
 if __name__ == "__main__":

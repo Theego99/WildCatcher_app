@@ -90,8 +90,6 @@ By installing or using {app} ("the Software"), you agree to the following terms.
 
 6. TERMINATION. This license terminates automatically if you breach these terms.
 
-Questions: {support}
-
 If you do not agree to these terms, click Decline and do not use the Software.
 """
 
@@ -1644,11 +1642,7 @@ class VideoDetectionApp(QMainWindow):
         ver.setStyleSheet("color:#CCC;")
         lay.addWidget(ver)
 
-        meta = QLabel(
-            f"© {wc_version.APP_PUBLISHER}<br>"
-            f"<a style='color:#9bc472;' href='{wc_version.APP_WEBSITE}'>{wc_version.APP_WEBSITE}</a><br>"
-            f"{trans.get('support_label', 'Support:')} {wc_version.SUPPORT_EMAIL}")
-        meta.setOpenExternalLinks(True)
+        meta = QLabel(f"© {wc_version.APP_PUBLISHER}")
         meta.setAlignment(Qt.AlignCenter)
         meta.setStyleSheet("color:#AAA; font-size:12px;")
         lay.addWidget(meta)
@@ -1786,8 +1780,7 @@ class VideoDetectionApp(QMainWindow):
         text = QTextEdit()
         text.setReadOnly(True)
         text.setPlainText(EULA_TEXT.format(
-            app=wc_version.APP_NAME, publisher=wc_version.APP_PUBLISHER,
-            support=wc_version.SUPPORT_EMAIL))
+            app=wc_version.APP_NAME, publisher=wc_version.APP_PUBLISHER))
         lay.addWidget(text)
         btns = QHBoxLayout()
         decline = QPushButton(trans.get("decline_button", "Decline"))
