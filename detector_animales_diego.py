@@ -30,7 +30,7 @@ from PyQt5.QtWidgets import (
     QTextEdit, QCheckBox, QSpinBox, QMessageBox,
     QSizePolicy, QDesktopWidget, QScrollArea, QFrame,
     QGraphicsOpacityEffect, QSplitter, QStackedWidget,
-    QComboBox, QInputDialog,
+    QComboBox, QInputDialog, QProgressDialog,
 )
 
 # WildCatcher modules
@@ -42,6 +42,7 @@ from wc_styles import (
 )
 from wc_translations import LANGUAGES, LANGUAGE_CODES, get_translation
 import wc_version
+import wc_update
 import wc_logging
 import wc_entitlements
 from wc_entitlements import FEATURE_CLASSIFY, FEATURE_EXPORT_PREMIUM
@@ -92,28 +93,6 @@ By installing or using {app} ("the Software"), you agree to the following terms.
 
 If you do not agree to these terms, click Decline and do not use the Software.
 """
-
-
-# =========================================================================
-# BACKGROUND UPDATE CHECK
-# =========================================================================
-class UpdateCheckThread(QThread):
-    """Silently query GitHub for a newer release (off the UI thread)."""
-    update_found = pyqtSignal(str, str)  # (tag, download_url)
-
-    def run(self):
-        try:
-            import requests
-            r = requests.get(wc_version.UPDATE_API_URL, timeout=8,
-                             headers={"Accept": "application/vnd.github+json"})
-            if r.status_code == 200:
-                data = r.json()
-                tag = data.get("tag_name", "")
-                if wc_version.is_newer(tag):
-                    self.update_found.emit(
-                        tag, data.get("html_url") or wc_version.RELEASES_URL)
-        except Exception as e:
-            logging.getLogger("update").info("startup update check failed: %s", e)
 
 
 # =========================================================================
@@ -1667,62 +1646,45 @@ class VideoDetectionApp(QMainWindow):
         dlg.exec_()
 
     def check_for_updates(self, manual=False):
-        """Check GitHub releases for a newer version. `manual`=user-initiated."""
+        """Look for a newer release. `manual`=user-initiated (report either way).
+
+        Always off the UI thread: this used to be a blocking requests.get on
+        the main thread, which froze the window for the whole timeout.
+        """
+        self._update_thread = wc_update.UpdateCheckThread()
+        if manual:
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            self._update_thread.checked.connect(self._on_manual_check_result)
+        else:
+            self._update_thread.update_found.connect(self._offer_update)
+        self._update_thread.start()
+
+    def _on_manual_check_result(self, info):
+        QApplication.restoreOverrideCursor()
         trans = self.trans
         title = trans.get("updates_title", "Updates")
-        try:
-            import requests
-            r = requests.get(wc_version.UPDATE_API_URL, timeout=8,
-                             headers={"Accept": "application/vnd.github+json"})
-            if r.status_code == 404:
-                # No published GitHub Release yet (repo uses tags only / private).
-                # Nothing newer to offer -> treat as up to date.
-                if manual:
-                    QMessageBox.information(self, title, trans.get(
-                        "up_to_date", "You're on the latest version ({cur}).").format(
-                            cur=wc_version.APP_VERSION))
-                return
-            if r.status_code != 200:
-                if manual:
-                    QMessageBox.information(self, title, trans.get(
-                        "update_check_failed", "Could not check for updates right now."))
-                return
-            data = r.json()
-            tag = data.get("tag_name", "")
-            if wc_version.is_newer(tag, wc_version.APP_VERSION):
-                box = QMessageBox(self)
-                box.setStyleSheet(DARK_MSGBOX_STYLE)
-                box.setWindowTitle(trans.get("update_available", "Update available"))
-                box.setText(trans.get(
-                    "update_available_msg",
-                    "A new version ({new}) is available.\nYou have {cur}.").format(
-                        new=tag, cur=wc_version.APP_VERSION))
-                box.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
-                dl = box.button(QMessageBox.Ok)
-                dl.setText(trans.get("download_button", "Download"))
-                if box.exec_() == QMessageBox.Ok:
-                    import webbrowser
-                    webbrowser.open(data.get("html_url") or wc_version.RELEASES_URL)
-            elif manual:
-                QMessageBox.information(self, title, trans.get(
-                    "up_to_date", "You're on the latest version ({cur}).").format(
-                        cur=wc_version.APP_VERSION))
-        except Exception as e:
-            logging.getLogger("update").info("update check failed: %s", e)
-            if manual:
-                QMessageBox.information(self, title, trans.get(
-                    "update_check_failed", "Could not check for updates right now."))
+        if info is None:
+            # Could not reach the channel -- never report this as "up to date".
+            QMessageBox.information(self, title, trans.get(
+                "update_check_failed", "Could not check for updates right now."))
+        elif wc_version.is_newer(info.get("version")):
+            self._offer_update(info)
+        else:
+            QMessageBox.information(self, title, trans.get(
+                "up_to_date", "You're on the latest version ({cur}).").format(
+                    cur=wc_version.APP_VERSION))
 
     def _maybe_check_updates_on_start(self):
         """Silent update check at most once per day (non-blocking)."""
         if self.settings.value("last_update_check", "") == wc_entitlements.today_iso():
             return
         self.settings.setValue("last_update_check", wc_entitlements.today_iso())
-        self._update_thread = UpdateCheckThread()
-        self._update_thread.update_found.connect(self._on_update_available)
-        self._update_thread.start()
+        self.check_for_updates(manual=False)
 
-    def _on_update_available(self, tag, url):
+    # ------------------------------------------------------------------
+    # In-app update: download -> verify -> swap -> relaunch
+    # ------------------------------------------------------------------
+    def _offer_update(self, info):
         trans = self.trans
         box = QMessageBox(self)
         box.setStyleSheet(DARK_MSGBOX_STYLE)
@@ -1730,12 +1692,104 @@ class VideoDetectionApp(QMainWindow):
         box.setText(trans.get(
             "update_available_msg",
             "A new version ({new}) is available.\nYou have {cur}.").format(
-                new=tag, cur=wc_version.APP_VERSION))
+                new=info.get("version", "?"), cur=wc_version.APP_VERSION))
+        notes = (info.get("notes") or "").strip()
+        if notes:
+            box.setInformativeText(notes[:600])
         box.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
-        box.button(QMessageBox.Ok).setText(trans.get("download_button", "Download"))
+        box.button(QMessageBox.Ok).setText(
+            trans.get("update_now_button", "Update now"))
+        box.button(QMessageBox.Cancel).setText(trans.get("later_button", "Later"))
+        if box.exec_() != QMessageBox.Ok:
+            return
+        if wc_update.is_frozen():
+            self._download_and_install(info)
+        else:
+            # Running from source -- nothing sensible to swap; open the page.
+            import webbrowser
+            webbrowser.open(info.get("page") or wc_version.RELEASES_URL)
+
+    def _download_and_install(self, info):
+        trans = self.trans
+        title = trans.get("updates_title", "Updates")
+        dlg = QProgressDialog(
+            trans.get("downloading_update", "Downloading update..."),
+            trans.get("cancel_button", "Cancel"), 0, 100, self)
+        dlg.setWindowTitle(title)
+        dlg.setWindowModality(Qt.WindowModal)
+        dlg.setMinimumDuration(0)
+        dlg.setAutoClose(False)
+        dlg.setAutoReset(False)
+        dlg.setValue(0)
+
+        thread = wc_update.UpdateDownloadThread(info, self)
+        self._update_dl_thread = thread
+
+        def on_progress(done, total):
+            if total > 0:
+                dlg.setMaximum(100)
+                dlg.setValue(int(done * 100 / total))
+                dlg.setLabelText("{}  {:.0f} / {:.0f} MB".format(
+                    trans.get("downloading_update", "Downloading update..."),
+                    done / 1048576, total / 1048576))
+            else:
+                dlg.setMaximum(0)  # busy indicator
+
+        def on_failed(msg):
+            dlg.close()
+            logging.getLogger("update").warning("update failed: %s", msg)
+            self._update_fallback(info)
+
+        def on_done(zip_path):
+            dlg.close()
+            self._install_downloaded(info, zip_path)
+
+        thread.progress.connect(on_progress)
+        thread.failed.connect(on_failed)
+        thread.done.connect(on_done)
+        dlg.canceled.connect(thread.cancel)
+        thread.start()
+
+    def _install_downloaded(self, info, zip_path):
+        trans = self.trans
+        box = QMessageBox(self)
+        box.setStyleSheet(DARK_MSGBOX_STYLE)
+        box.setWindowTitle(trans.get("updates_title", "Updates"))
+        box.setText(trans.get(
+            "update_ready_msg",
+            "The update is ready. WildCatcher will close, install it and "
+            "reopen automatically."))
+        box.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
+        box.button(QMessageBox.Ok).setText(
+            trans.get("restart_now_button", "Restart now"))
+        box.button(QMessageBox.Cancel).setText(trans.get("later_button", "Later"))
+        if box.exec_() != QMessageBox.Ok:
+            return
+        try:
+            wc_update.stage_and_launch(zip_path)
+        except Exception as e:
+            logging.getLogger("update").warning("install failed: %s", e)
+            self._update_fallback(info)
+            return
+        QtWidgets.QApplication.instance().quit()
+
+    def _update_fallback(self, info):
+        """Auto-install did not work -- offer the manual download instead."""
+        trans = self.trans
+        box = QMessageBox(self)
+        box.setStyleSheet(DARK_MSGBOX_STYLE)
+        box.setWindowTitle(trans.get("updates_title", "Updates"))
+        box.setText(trans.get(
+            "update_install_failed",
+            "The update could not be installed automatically. "
+            "You can download it manually instead."))
+        box.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
+        box.button(QMessageBox.Ok).setText(
+            trans.get("download_button", "Download"))
+        box.button(QMessageBox.Cancel).setText(trans.get("close_button", "Close"))
         if box.exec_() == QMessageBox.Ok:
             import webbrowser
-            webbrowser.open(url)
+            webbrowser.open(info.get("page") or wc_version.RELEASES_URL)
 
     def save_diagnostics(self):
         trans = self.trans
