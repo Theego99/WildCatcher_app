@@ -14,6 +14,20 @@ import sys
 sys.path.insert(0, SPECPATH)  # PyInstaller spec-file global: dir of this file
 import wc_version  # single source of truth for the app version
 
+# Fail loudly if we are packaging with the wrong interpreter. PyInstaller only
+# *warns* about a missing import, so building outside the project venv produced
+# a complete-looking dist/ whose exes died at launch with
+# "ModuleNotFoundError: No module named 'onnxruntime'". Inference is the whole
+# app; there is no build worth shipping without it.
+try:
+    import onnxruntime  # noqa: F401
+except ImportError as _e:
+    raise SystemExit(
+        f"onnxruntime is not importable from {sys.executable}.\n"
+        "Build from the project venv:  venv\\Scripts\\python.exe -m PyInstaller "
+        "wildcatcher.spec --noconfirm"
+    ) from _e
+
 block_cipher = None
 
 # PyInstaller rejects a .ico icon on macOS (wants .icns); use the icon only on Windows.
