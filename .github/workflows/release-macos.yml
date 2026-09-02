@@ -29,18 +29,34 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install torch torchvision
+          # CPU torch (conversion only). 2.7.1 = legacy ONNX exporter, no onnxscript needed.
+          pip install torch==2.7.1 torchvision==0.22.1
           pip install -r requirements-base.txt
           pip install pyinstaller
+
+      - name: Verify ONNX Runtime providers
+        run: python -c "import onnxruntime as ort; print('ORT', ort.__version__); print(ort.get_available_providers())"
+
+      - name: Convert built-in detector to ONNX (build-time only)
+        # ultralytics + yolov5's module-load deps (pandas/seaborn/tqdm) are needed
+        # only to load the YOLOv5 .pt for conversion; NONE are bundled into the app
+        # (the spec excludes yolov5/ultralytics and the runtime never imports them).
+        run: |
+          pip install ultralytics pandas seaborn tqdm
+          python tools/convert_to_onnx.py
 
       - name: Build with PyInstaller
         run: pyinstaller wildcatcher.spec
 
-      - name: Zip output
+      - name: Package .app (ad-hoc sign + ditto zip)
         run: |
-          cd dist
-          zip -r ../WildCatcher-macOS-arm64.zip WildCatcher.app || zip -r ../WildCatcher-macOS-arm64.zip WildCatcher
-          cd ..
+          APP="dist/WildCatcher.app"
+          if [ ! -d "$APP" ]; then echo "ERROR: $APP not found"; ls -la dist; exit 1; fi
+          # Apple Silicon requires at least an ad-hoc signature to launch.
+          codesign --force --deep --sign - "$APP" || echo "ad-hoc sign failed (continuing)"
+          # ditto preserves the bundle's executable bits/symlinks (zip -r can break .app)
+          ditto -c -k --keepParent "$APP" WildCatcher-macOS-arm64.zip
+          ls -lh WildCatcher-macOS-arm64.zip
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -48,9 +64,16 @@ jobs:
           tag_name: ${{ github.ref_name }}
           name: WildCatcher macOS ${{ github.ref_name }}
           body: |
-            ### macOS Download
-            GPU acceleration is automatic on Apple Silicon (M1/M2/M3/M4) via MPS.
+            ### macOS download (Apple Silicon)
+            GPU acceleration via ONNX Runtime CoreML; CPU fallback otherwise.
 
-            **Install:** Download → Extract → Run `WildCatcher`
-            If macOS says "app is damaged": `xattr -cr /path/to/WildCatcher.app`
+            **Install:**
+            1. Download and unzip → you get **`WildCatcher.app`** (move it to Applications if you like).
+            2. The app is unsigned, so the first time: **right-click the app → Open → Open**.
+               (Plain double-click is blocked by Gatekeeper until you do this once.)
+            3. If macOS says it's "damaged"/can't be opened, run once in Terminal:
+               `xattr -dr com.apple.quarantine /path/to/WildCatcher.app`
+
+            **Video playback** requires [VLC](https://www.videolan.org/vlc/) installed;
+            detection, classification and report export work without it.
           files: WildCatcher-macOS-arm64.zip

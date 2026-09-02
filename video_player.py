@@ -16,21 +16,32 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
-# --- VLC DLL and plugin setup (ONLY ONCE, globally) ---
+# --- VLC library + plugin setup (ONLY ONCE, globally) ---
+# Windows ships a bundled vlc/ folder; macOS/Linux fall back to a system VLC
+# install (python-vlc locates it). Never hard-fail here — the app must launch
+# even if VLC is absent (video playback is optional; detection/export don't need it).
 vlc_path = resource_path('vlc')
-libvlc_path = os.path.join(vlc_path, 'libvlc.dll')
+_LIBVLC_NAME = {'win32': 'libvlc.dll', 'darwin': 'libvlc.dylib'}.get(sys.platform, 'libvlc.so')
+libvlc_path = os.path.join(vlc_path, _LIBVLC_NAME)
 plugins_path = os.path.join(vlc_path, 'plugins')
 os.environ['PATH'] = vlc_path + os.pathsep + os.environ.get('PATH', '')
-os.environ['VLC_PLUGIN_PATH'] = plugins_path
+if os.path.isdir(plugins_path):
+    os.environ['VLC_PLUGIN_PATH'] = plugins_path
 
 try:
-    ctypes.CDLL(libvlc_path)
-    logging.debug("Successfully loaded libvlc.dll")
+    if os.path.exists(libvlc_path):
+        ctypes.CDLL(libvlc_path)
+        logging.debug(f"Loaded bundled libvlc from {libvlc_path}")
 except Exception as e:
-    logging.error(f"Failed to load libvlc.dll: {e}")
-    # Optionally: sys.exit(1)  # Uncomment if you want to hard-fail
+    logging.error(f"Failed to preload bundled libvlc: {e}")
 
-import vlc  # <-- do this only after the above setup
+try:
+    import vlc  # python-vlc; uses bundled or system libvlc
+    VLC_AVAILABLE = True
+except Exception as e:
+    logging.error(f"python-vlc not available (is VLC installed?): {e}")
+    vlc = None
+    VLC_AVAILABLE = False
 
 from PyQt5 import QtWidgets, QtGui
 from PyQt5.QtCore import Qt, QSize
@@ -52,6 +63,12 @@ translations = {
         "success": "成功",
         "rename_success": "ビデオが正常にリネームされました。",
         "rename_error": "ビデオのリネームに失敗しました。",
+        "frame_back": "前フレーム",
+        "frame_forward": "次フレーム",
+        "screenshot": "スクリーンショット",
+        "screenshot_saved": "スクリーンショットを保存しました",
+        "screenshot_failed": "スクリーンショットの保存に失敗しました",
+        "save_screenshot": "スクリーンショットを保存",
     },
     "en": {
         "open_video": "Open Video",
@@ -65,6 +82,12 @@ translations = {
         "success": "Success",
         "rename_success": "Video renamed successfully.",
         "rename_error": "Failed to rename video.",
+        "frame_back": "Frame Back",
+        "frame_forward": "Frame Forward",
+        "screenshot": "Screenshot",
+        "screenshot_saved": "Screenshot saved",
+        "screenshot_failed": "Failed to save screenshot",
+        "save_screenshot": "Save Screenshot",
     },
     "es": {
         "open_video": "Abrir video",
@@ -78,6 +101,12 @@ translations = {
         "success": "Éxito",
         "rename_success": "Video renombrado con éxito.",
         "rename_error": "Error al renombrar el video.",
+        "frame_back": "Cuadro anterior",
+        "frame_forward": "Cuadro siguiente",
+        "screenshot": "Captura",
+        "screenshot_saved": "Captura guardada",
+        "screenshot_failed": "Error al guardar captura",
+        "save_screenshot": "Guardar captura",
     },
     "kr": {
         "open_video": "비디오 열기",
@@ -91,6 +120,12 @@ translations = {
         "success": "성공",
         "rename_success": "비디오 이름이 성공적으로 변경되었습니다.",
         "rename_error": "비디오 이름 변경 실패.",
+        "frame_back": "이전 프레임",
+        "frame_forward": "다음 프레임",
+        "screenshot": "스크린샷",
+        "screenshot_saved": "스크린샷 저장됨",
+        "screenshot_failed": "스크린샷 저장 실패",
+        "save_screenshot": "스크린샷 저장",
     },
     "cn": {
         "open_video": "打开视频",
@@ -104,6 +139,12 @@ translations = {
         "success": "成功",
         "rename_success": "视频重命名成功。",
         "rename_error": "视频重命名失败。",
+        "frame_back": "上一帧",
+        "frame_forward": "下一帧",
+        "screenshot": "截图",
+        "screenshot_saved": "截图已保存",
+        "screenshot_failed": "截图保存失败",
+        "save_screenshot": "保存截图",
     },
 }
 
@@ -142,59 +183,41 @@ class VideoPlayer(QtWidgets.QMainWindow):
 
             # Set the window icon
             self.setWindowIcon(QtGui.QIcon(icon_path))
-            # Path to VLC directory
+            # Locate libvlc: prefer the bundled copy (Windows ships vlc/), else
+            # rely on a system VLC install (macOS/Linux). Never sys.exit here —
+            # raise so the caller keeps the app alive (video playback is optional).
             vlc_path = resource_path('vlc')
-            logging.debug(f"VLC path set to: {vlc_path}")
-
-            # Path to libvlc.dll
-            libvlc_path = os.path.join(vlc_path, 'libvlc.dll')
-            logging.debug(f"libvlc.dll path set to: {libvlc_path}")
-
-            # Check if libvlc.dll exists
-            if not os.path.exists(libvlc_path):
-                error_msg = f"libvlc.dll not found at {libvlc_path}. Please ensure the VLC directory is bundled correctly."
-                logging.error(error_msg)
-                QMessageBox.critical(
-                    self,
-                    "VLC DLL Not Found",
-                    error_msg
-                )
-                sys.exit(1)
-
-            # Load libvlc.dll using ctypes
-            try:
-                ctypes.cdll.LoadLibrary(libvlc_path)
-                logging.debug(f"Successfully loaded libvlc.dll from {libvlc_path}")
-            except Exception as e:
-                error_msg = f"Failed to load libvlc.dll: {e}"
-                logging.error(error_msg)
-                QMessageBox.critical(
-                    self,
-                    "Failed to Load VLC DLL",
-                    error_msg
-                )
-                sys.exit(1)
-
-            # Set the VLC plugin path environment variable
+            libvlc_path = os.path.join(vlc_path, _LIBVLC_NAME)
             plugins_path = os.path.join(vlc_path, 'plugins')
-            os.environ['VLC_PLUGIN_PATH'] = plugins_path
-            logging.debug(f"VLC_PLUGIN_PATH set to: {plugins_path}")
+            if os.path.exists(libvlc_path):
+                try:
+                    ctypes.cdll.LoadLibrary(libvlc_path)
+                    os.environ['VLC_PLUGIN_PATH'] = plugins_path
+                    logging.debug(f"Loaded bundled libvlc from {libvlc_path}")
+                except Exception as e:
+                    logging.error(f"Failed to load bundled libvlc: {e}")
 
-            # Initialize VLC instance with the plugin path
+            if not VLC_AVAILABLE or vlc is None:
+                error_msg = ("VLC is not available. Install VLC from videolan.org "
+                             "to use the video player.")
+                QMessageBox.critical(self, "VLC not available", error_msg)
+                raise RuntimeError(error_msg)
+
+            # Initialize VLC instance (use bundled plugins if present, else system VLC)
             try:
-                self.instance = vlc.Instance('--no-xlib', f'--plugin-path={plugins_path}')
+                if os.path.isdir(plugins_path):
+                    self.instance = vlc.Instance('--no-xlib', f'--plugin-path={plugins_path}')
+                else:
+                    self.instance = vlc.Instance('--no-xlib')
                 if self.instance is None:
                     raise ValueError("vlc.Instance() returned None.")
                 logging.debug("VLC Instance created successfully.")
             except Exception as e:
-                error_msg = f"Failed to create VLC Instance: {e}"
+                error_msg = ("Could not start VLC. On macOS/Linux, install VLC from "
+                             f"videolan.org to use the video player. ({e})")
                 logging.error(error_msg)
-                QMessageBox.critical(
-                    self,
-                    "VLC Initialization Error",
-                    error_msg
-                )
-                sys.exit(1)
+                QMessageBox.critical(self, "VLC Initialization Error", error_msg)
+                raise RuntimeError(error_msg)
 
             # Initialize media player
             try:
@@ -210,7 +233,7 @@ class VideoPlayer(QtWidgets.QMainWindow):
                     "Media Player Initialization Error",
                     error_msg
                 )
-                sys.exit(1)
+                raise RuntimeError(error_msg)
 
             self.current_folder = ""
             self.video_files = []
@@ -253,10 +276,12 @@ class VideoPlayer(QtWidgets.QMainWindow):
         self.video_frame = QtWidgets.QFrame(self)
         self.setCentralWidget(self.video_frame)
 
-        # Controls layout
+        # --- Build a fixed-width controls bar, centered horizontally ---
         controls_layout = QHBoxLayout()
+        controls_layout.setSpacing(4)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
 
-        # Unified modern style for all control buttons
+        # Styles
         button_style = """
             QPushButton {
                 background-color: white;
@@ -264,19 +289,13 @@ class VideoPlayer(QtWidgets.QMainWindow):
                 border: 1px solid #ccc;
                 border-radius: 6px;
                 padding: 8px 16px;
-                font-size: 30px;
+                font-size: 14px;
             }
             QPushButton:hover {
                 background-color: #f0f0f0;
                 border-color: #999;
             }
         """
-        # Open Button
-        self.open_button = QPushButton(self.trans["open_video"])
-        self.open_button.setStyleSheet(button_style)
-        self.open_button.clicked.connect(self.open_file)
-        self.open_button.setFixedHeight(50)
-        controls_layout.addWidget(self.open_button)
         icon_button_style = """
             QPushButton {
                 background-color: white;
@@ -289,14 +308,31 @@ class VideoPlayer(QtWidgets.QMainWindow):
             }
         """
 
+        # Open Button
+        self.open_button = QPushButton(self.trans["open_video"])
+        self.open_button.setStyleSheet(button_style)
+        self.open_button.clicked.connect(self.open_file)
+        self.open_button.setFixedSize(120, 50)
+        controls_layout.addWidget(self.open_button)
+
         # Previous Button
         self.prev_button = QPushButton()
         self.prev_button.setIcon(QtGui.QIcon(resource_path("assets/prev_icon.png")))
         self.prev_button.setIconSize(QSize(32, 32))
         self.prev_button.setStyleSheet(icon_button_style)
         self.prev_button.clicked.connect(self.prev_video)
-        self.prev_button.setFixedHeight(50)
+        self.prev_button.setFixedSize(50, 50)
         controls_layout.addWidget(self.prev_button)
+
+        # Frame Back Button
+        self.frame_back_button = QPushButton()
+        self.frame_back_button.setIcon(QtGui.QIcon(resource_path("assets/frame_back.png")))
+        self.frame_back_button.setIconSize(QSize(28, 28))
+        self.frame_back_button.setToolTip(self.trans["frame_back"])
+        self.frame_back_button.setStyleSheet(icon_button_style)
+        self.frame_back_button.clicked.connect(self.frame_back)
+        self.frame_back_button.setFixedSize(50, 50)
+        controls_layout.addWidget(self.frame_back_button)
 
         # Play/Pause Button
         self.play_pause_button = QPushButton()
@@ -304,8 +340,18 @@ class VideoPlayer(QtWidgets.QMainWindow):
         self.play_pause_button.setIconSize(QSize(32, 32))
         self.play_pause_button.setStyleSheet(icon_button_style)
         self.play_pause_button.clicked.connect(self.play_pause)
-        self.play_pause_button.setFixedHeight(50)
+        self.play_pause_button.setFixedSize(50, 50)
         controls_layout.addWidget(self.play_pause_button)
+
+        # Frame Forward Button
+        self.frame_fwd_button = QPushButton()
+        self.frame_fwd_button.setIcon(QtGui.QIcon(resource_path("assets/frame_forward.png")))
+        self.frame_fwd_button.setIconSize(QSize(28, 28))
+        self.frame_fwd_button.setToolTip(self.trans["frame_forward"])
+        self.frame_fwd_button.setStyleSheet(icon_button_style)
+        self.frame_fwd_button.clicked.connect(self.frame_forward)
+        self.frame_fwd_button.setFixedSize(50, 50)
+        controls_layout.addWidget(self.frame_fwd_button)
 
         # Replay Button
         self.replay_button = QPushButton()
@@ -313,7 +359,7 @@ class VideoPlayer(QtWidgets.QMainWindow):
         self.replay_button.setIconSize(QSize(32, 32))
         self.replay_button.setStyleSheet(icon_button_style)
         self.replay_button.clicked.connect(self.replay_video)
-        self.replay_button.setFixedHeight(50)
+        self.replay_button.setFixedSize(50, 50)
         controls_layout.addWidget(self.replay_button)
 
         # Next Button
@@ -322,46 +368,63 @@ class VideoPlayer(QtWidgets.QMainWindow):
         self.next_button.setIconSize(QSize(32, 32))
         self.next_button.setStyleSheet(icon_button_style)
         self.next_button.clicked.connect(self.next_video)
-        self.next_button.setFixedHeight(50)
+        self.next_button.setFixedSize(50, 50)
         controls_layout.addWidget(self.next_button)
+
+        # Screenshot Button
+        self.screenshot_button = QPushButton()
+        self.screenshot_button.setIcon(QtGui.QIcon(resource_path("assets/save_frame.png")))
+        self.screenshot_button.setIconSize(QSize(28, 28))
+        self.screenshot_button.setToolTip(self.trans["screenshot"])
+        self.screenshot_button.setStyleSheet(icon_button_style)
+        self.screenshot_button.clicked.connect(self.save_screenshot)
+        self.screenshot_button.setFixedSize(50, 50)
+        controls_layout.addWidget(self.screenshot_button)
 
         # Speed Control Label
         self.speed_label = QLabel(self.trans["playback_speed"])
         self.speed_label.setAlignment(Qt.AlignCenter)
+        self.speed_label.setFixedHeight(50)
         controls_layout.addWidget(self.speed_label)
 
         # Speed Control ComboBox
         self.speed_combo = QComboBox(self)
         self.speed_combo.setStyleSheet("""
-    QComboBox {
-        color: black;
-        background-color: white;
-    }
-    QComboBox QAbstractItemView {
-        background-color: black;
-        color: white;
-        selection-background-color: white;
-        selection-color: black;
-    }
-""")
-
+            QComboBox {
+                color: black;
+                background-color: white;
+            }
+            QComboBox QAbstractItemView {
+                background-color: black;
+                color: white;
+                selection-background-color: white;
+                selection-color: black;
+            }
+        """)
         log_speeds = [1, 2, 4, 8, 16, 32]
-        self.speed_combo.addItems([f"x{v}" for v in log_speeds])    # 1.0x to 20.0x
-        self.speed_combo.setCurrentText("1.0")  # Default speed
+        self.speed_combo.addItems([f"x{v}" for v in log_speeds])
+        self.speed_combo.setCurrentText("x1")
         self.speed_combo.currentTextChanged.connect(self.change_speed)
-        self.speed_combo.setFixedHeight(50)
+        self.speed_combo.setFixedSize(70, 50)
         controls_layout.addWidget(self.speed_combo)
 
+        # --- Fixed-width container for controls, centered in the window ---
+        controls_widget = QWidget()
+        controls_widget.setLayout(controls_layout)
+        controls_widget.setSizePolicy(
+            QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed
+        )
 
-    # Main layout
-        layout = QVBoxLayout()
-        layout.addWidget(self.video_frame)
-        layout.addLayout(controls_layout)
+        controls_center_layout = QHBoxLayout()
+        controls_center_layout.setContentsMargins(0, 0, 0, 0)
+        controls_center_layout.addStretch()
+        controls_center_layout.addWidget(controls_widget)
+        controls_center_layout.addStretch()
 
-        # Rename controls layout
+        # --- Rename bar (also fixed-width, centered) ---
         rename_layout = QHBoxLayout()
+        rename_layout.setContentsMargins(0, 0, 0, 0)
 
-        # Text field for entering new name
         self.rename_line_edit = QtWidgets.QLineEdit(self)
         self.rename_line_edit.setStyleSheet("""
             QLineEdit {
@@ -371,25 +434,36 @@ class VideoPlayer(QtWidgets.QMainWindow):
                 selection-background-color: #0078D4;
             }
         """)
+        self.rename_line_edit.setFixedHeight(30)
         rename_layout.addWidget(self.rename_line_edit)
 
-        # Connect returnPressed signal to rename_video method
-        self.rename_line_edit.returnPressed.connect(self.rename_video) 
+        self.rename_line_edit.returnPressed.connect(self.rename_video)
 
-        # Rename button
         self.rename_button = QPushButton("OK")
         self.rename_button.setStyleSheet("color: black;")
         self.rename_button.clicked.connect(self.rename_video)
+        self.rename_button.setFixedSize(50, 30)
         rename_layout.addWidget(self.rename_button)
 
-        # Adjust sizes and styles if necessary
-        self.rename_button.setFixedHeight(30)
-        self.rename_line_edit.setFixedHeight(30)
+        rename_widget = QWidget()
+        rename_widget.setLayout(rename_layout)
+        rename_widget.setSizePolicy(
+            QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed
+        )
+        rename_widget.setFixedWidth(controls_widget.sizeHint().width())
 
-        # Add the rename_layout to the main layout
-        layout.addLayout(rename_layout)
+        rename_center_layout = QHBoxLayout()
+        rename_center_layout.setContentsMargins(0, 0, 0, 0)
+        rename_center_layout.addStretch()
+        rename_center_layout.addWidget(rename_widget)
+        rename_center_layout.addStretch()
 
-        # Container widget to apply layout
+        # --- Main layout ---
+        layout = QVBoxLayout()
+        layout.addWidget(self.video_frame)
+        layout.addLayout(controls_center_layout)
+        layout.addLayout(rename_center_layout)
+
         container = QWidget()
         container.setLayout(layout)
         self.setCentralWidget(container)
@@ -503,7 +577,7 @@ class VideoPlayer(QtWidgets.QMainWindow):
 
             # Update the window title with the video name
             video_name = os.path.basename(video_path)
-            self.setWindowTitle(f"DiegoMOV プレーヤー - {video_name}")
+            self.setWindowTitle(f"Wild Player - {video_name}")
 
             # Update the rename line edit with the current video name (without extension)
             base_name, _ = os.path.splitext(video_name)
@@ -543,6 +617,67 @@ class VideoPlayer(QtWidgets.QMainWindow):
             self.media_player.stop()
             self.media_player.play()
             logging.debug("Video replayed using stop() and play()")  # Debugging
+
+    def frame_back(self):
+        """Step one frame backward (only when paused)."""
+        if self.media_player.is_playing():
+            return
+        fps = self.media_player.get_fps()
+        if fps <= 0:
+            fps = 30.0
+        frame_ms = int(1000.0 / fps)
+        current = self.media_player.get_time()
+        new_time = max(0, current - frame_ms)
+        self.media_player.set_time(new_time)
+        logging.debug(f"Frame back: {current}ms -> {new_time}ms (fps={fps:.1f})")
+
+    def frame_forward(self):
+        """Step one frame forward (only when paused)."""
+        if self.media_player.is_playing():
+            return
+        self.media_player.next_frame()
+        logging.debug("Frame forward")
+
+    def save_screenshot(self):
+        """Save the current frame as an image file."""
+        if self.media_player.is_playing():
+            return
+        if not self.media_player.get_media():
+            return
+
+        # Build default filename from video name + timestamp
+        video_name = ""
+        if self.video_files and self.current_video_index >= 0:
+            video_name = os.path.splitext(
+                os.path.basename(self.video_files[self.current_video_index])
+            )[0]
+        current_ms = self.media_player.get_time()
+        default_name = f"{video_name}_frame_{current_ms}ms.png" if video_name else "screenshot.png"
+
+        start_dir = self.current_folder if self.current_folder else ""
+        save_path, _ = QFileDialog.getSaveFileName(
+            self,
+            self.trans["save_screenshot"],
+            os.path.join(start_dir, default_name),
+            "PNG (*.png);;JPEG (*.jpg);;BMP (*.bmp)",
+        )
+        if not save_path:
+            return
+
+        # VLC snapshot: 0 = video output index, 0/0 = original resolution
+        result = self.media_player.video_take_snapshot(0, save_path, 0, 0)
+        if result == 0:
+            logging.debug(f"Screenshot saved to {save_path}")
+            QtWidgets.QMessageBox.information(
+                self, self.trans["success"],
+                f"{self.trans['screenshot_saved']}:\n{save_path}",
+            )
+        else:
+            logging.error(f"Screenshot failed (VLC returned {result})")
+            QtWidgets.QMessageBox.warning(
+                self, self.trans["screenshot_failed"],
+                self.trans["screenshot_failed"],
+            )
 
     def change_speed(self, speed_text):
         speed = float(speed_text.replace("x", ""))  # Remove the "x"

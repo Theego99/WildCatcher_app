@@ -1,0 +1,86 @@
+[
+  {
+    "id": "multiclass_animal_classifier",
+    "name": "multiclass_animal_classifier",
+    "type": "classifier",
+    "filename": "multiclass_animal_classifier.pth",
+    "class_names": [
+      "bear",
+      "bird",
+      "boar",
+      "cat",
+      "deer",
+      "fox",
+      "japanese_badger",
+      "japanese_hare",
+      "marten",
+      "masked_palm_civet",
+      "monkey",
+      "muntjac",
+      "raccoon",
+      "rodent",
+      "serow",
+      "tanuki"
+    ],
+    "architecture": "efficientnet_b0"
+  },
+  {
+    "id": "binary_bear_vs_rest",
+    "name": "binary_bear_vs_rest",
+    "type": "classifier",
+    "filename": "binary_bear_vs_rest.pth",
+    "class_names": [
+      "bear",
+      "rest"
+    ],
+    "architecture": "efficientnet_b0",
+    "head_type": "standard"
+  },
+  {
+    "id": "binary_deer_vs_rest",
+    "name": "binary_deer_vs_rest",
+    "type": "classifier",
+    "filename": "binary_deer_vs_rest.pth",
+    "class_names": [
+      "deer",
+      "rest"
+    ],
+    "architecture": "efficientnet_b0",
+    "head_type": "standard"
+  },
+  {
+    "id": "animal_classifier_v3",
+    "name": "animal_classifier_v3",
+    "type": "classifier",
+    "filename": "animal_classifier_v3.pth",
+    "class_names": [
+      "bear",
+      "bird",
+      "boar",
+      "cat",
+      "deer",
+      "fox",
+      "monkey",
+      "muntjac",
+      "raccoon-tanuki",
+      "rest",
+      "serow"
+    ],
+    "architecture": "efficientnet_b0",
+    "head_type": "standard"
+  },
+  {
+    "id": "4type_classifier",
+    "name": "4type_classifier",
+    "type": "classifier",
+    "filename": "4type_classifier.pth",
+    "class_names": [
+      "bear",
+      "boar",
+      "deer",
+      "rest"
+    ],
+    "architecture": "efficientnet_b0",
+    "head_type": "standard"
+  }
+]

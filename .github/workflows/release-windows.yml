@@ -29,23 +29,78 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          # CPU-only torch: used only to convert user-added models to ONNX, not for inference.
+          # Pinned to 2.7.1 (legacy ONNX exporter; newer torch needs the extra onnxscript dep).
+          pip install torch==2.7.1 torchvision==0.22.1 --index-url https://download.pytorch.org/whl/cpu
           pip install -r requirements-base.txt
           pip install pyinstaller
+
+      - name: Verify ONNX Runtime GPU provider
+        run: |
+          python -c "import onnxruntime as ort; print('ORT', ort.__version__); print('providers', ort.get_available_providers())"
+
+      - name: Convert built-in detector to ONNX (build-time only)
+        # ultralytics + yolov5's module-load deps (pandas/seaborn/tqdm) are needed
+        # only to load the YOLOv5 .pt for conversion; NONE are bundled into the app
+        # (the spec excludes yolov5/ultralytics and the runtime never imports them).
+        run: |
+          pip install ultralytics pandas seaborn tqdm
+          python tools/convert_to_onnx.py
 
       - name: Build with PyInstaller
         run: pyinstaller wildcatcher.spec
 
-      - name: Show output size
+      # Code signing — only runs once you add the Azure Trusted Signing secrets
+      # (repo Settings -> Secrets -> Actions). Until then it is skipped and the
+      # build ships unsigned. See SIGNING.md.
+      - name: Sign with Azure Trusted Signing (if configured)
+        if: ${{ secrets.AZURE_TENANT_ID != '' }}
+        uses: azure/trusted-signing-action@v0.5.1
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ secrets.AZURE_TS_ENDPOINT }}
+          trusted-signing-account-name: ${{ secrets.AZURE_TS_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.AZURE_TS_PROFILE }}
+          files-folder: ${{ github.workspace }}\dist\WildCatcher
+          files-folder-filter: exe,dll
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Smoke test - verify exe starts
+        run: |
+          $proc = Start-Process -FilePath "dist\WildCatcher\WildCatcher.exe" -PassThru
+          Start-Sleep -Seconds 10
+          if ($proc.HasExited) {
+            Write-Host "ERROR: App exited with code $($proc.ExitCode)"
+            exit 1
+          } else {
+            Write-Host "SUCCESS: App is running (PID $($proc.Id))"
+            Stop-Process -Id $proc.Id -Force
+          }
+        shell: powershell
+
+      - name: Smoke test - verify CLI exe runs
+        run: |
+          dist\WildCatcher\WildCatcher-CLI.exe --list-profiles
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "ERROR: WildCatcher-CLI.exe exited with code $LASTEXITCODE"
+            exit 1
+          }
+        shell: powershell
+
+      - name: Show folder size
         run: |
           $size = (Get-ChildItem dist/WildCatcher/ -Recurse | Measure-Object -Property Length -Sum).Sum / 1MB
           Write-Host "Total folder size: $([math]::Round($size,1)) MB"
 
-      - name: Zip output
-        run: Compress-Archive -Path dist/WildCatcher -DestinationPath WildCatcher-Windows-x64.zip
+      - name: Compress with 7z
+        run: 7z a -t7z -mx=9 WildCatcher-Windows-x64.7z dist/WildCatcher/
 
-      - name: Show zip size
-        run: Get-Item WildCatcher-Windows-x64.zip | Select-Object Name, @{n='SizeMB';e={[math]::Round($_.Length/1MB,1)}}
+      - name: Show archive size
+        run: Get-Item WildCatcher-Windows-x64.7z | Select-Object Name, @{n='SizeMB';e={[math]::Round($_.Length/1MB,1)}}
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -54,10 +109,12 @@ jobs:
           name: WildCatcher Windows ${{ github.ref_name }}
           body: |
             ### Windows Download
-            Works out of the box on CPU.
+            GPU-accelerated via DirectML — works on any DirectX 12 GPU
+            (NVIDIA, AMD, Intel). Falls back to CPU automatically if none found.
 
-            **For NVIDIA GPU acceleration**, run:
-            `pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121`
-
-            **Install:** Download → Extract the `WildCatcher` folder → Run `WildCatcher.exe` inside it
-          files: WildCatcher-Windows-x64.zip
+            **Install:**
+            1. Download `WildCatcher-Windows-x64.7z`
+            2. Extract with [7-Zip](https://www.7-zip.org/) or WinRAR
+            3. Open the `WildCatcher` folder
+            4. Run `WildCatcher.exe`
+          files: WildCatcher-Windows-x64.7z
