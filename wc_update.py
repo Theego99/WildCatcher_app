@@ -184,6 +184,25 @@ def _quiet_remove(path):
         pass
 
 
+def _require_writable(path):
+    """Raise unless we can actually create a file in `path`.
+
+    os.access(..., W_OK) only reports the read-only attribute on Windows, not
+    the ACL -- it says True for an admin-installed C:\\Program Files\\WildCatcher
+    that a standard user cannot write. Probing for real lets the caller fall
+    back to the manual download before the app quits, instead of the helper
+    silently failing after the window is gone.
+    """
+    probe = os.path.join(path, ".wc_update_probe")
+    try:
+        with open(probe, "wb") as fh:
+            fh.write(b"1")
+    except OSError as e:
+        raise PermissionError(f"cannot write to {path}: {e}") from e
+    finally:
+        _quiet_remove(probe)
+
+
 def _extract(zip_path, staging):
     """Unpack `zip_path` into `staging` and return the dir holding the exe."""
     if os.path.isdir(staging):
@@ -241,8 +260,7 @@ def stage_and_launch(zip_path, target_dir=None):
     afterwards -- the helper is already waiting on this process to exit.
     """
     target_dir = target_dir or install_dir()
-    if not os.access(target_dir, os.W_OK):
-        raise PermissionError(f"no write access to {target_dir}")
+    _require_writable(target_dir)
 
     staging = os.path.join(tempfile.gettempdir(),
                            f"{wc_version.APP_NAME}_update_stage")
