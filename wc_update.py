@@ -237,9 +237,13 @@ Start-Sleep -Milliseconds 800
 
 # /E (not /MIR): merge over the install, never delete extras. The install dir
 # also holds models\, profiles\ and license.wcl -- mirroring would wipe them.
+# /IS /IT: copy even when robocopy judges a file "same" or "tweaked". Without
+# them it skips on a size+timestamp match and the update silently no-ops.
+# Its own log file, in Unicode: robocopy writes OEM codepage, PowerShell writes
+# UTF-8, and interleaving them in one file mangles non-ASCII paths.
 $rc = Start-Process -FilePath robocopy.exe -ArgumentList @(
-    "`"$Source`"", "`"$Dest`"", "/E", "/R:3", "/W:1", "/NFL", "/NDL", "/NP",
-    "/LOG+:`"$LogFile`""
+    "`"$Source`"", "`"$Dest`"", "/E", "/IS", "/IT", "/R:3", "/W:1",
+    "/NFL", "/NDL", "/NP", "/UNILOG:`"$LogFile.robocopy.log`""
 ) -Wait -PassThru -WindowStyle Hidden
 "robocopy exit $($rc.ExitCode)" | Out-File -LiteralPath $LogFile -Append -Encoding utf8
 

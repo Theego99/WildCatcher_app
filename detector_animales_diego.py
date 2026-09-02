@@ -1651,6 +1651,9 @@ class VideoDetectionApp(QMainWindow):
         Always off the UI thread: this used to be a blocking requests.get on
         the main thread, which froze the window for the whole timeout.
         """
+        prev = getattr(self, "_update_thread", None)
+        if prev is not None and prev.isRunning():
+            return  # a check is already in flight; replacing it would kill it
         self._update_thread = wc_update.UpdateCheckThread()
         if manual:
             QApplication.setOverrideCursor(Qt.WaitCursor)
